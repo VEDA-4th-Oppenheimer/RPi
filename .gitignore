@@ -1,0 +1,26 @@
+# ── 커널 모듈 빌드 산출물 ──
+*.ko
+*.o
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+modules.order
+Module.symvers
+.tmp_versions/
+.*.cmd
+*.dtbo
+
+# ── 유저 앱 / 데몬 빌드 산출물 ──
+turret_test
+build/
+build_host/
+compile_commands.json
+*.a
+*.so
+
+# ── IDE / OS ──
+.idea/
+.cache/
+.vscode/
+.DS_Store

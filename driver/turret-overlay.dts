@@ -1,0 +1,34 @@
+/*
+ * turret-overlay.dts — /dev/turret serdev 드라이버 Device Tree Overlay
+ *
+ * RPi UART0 (PL011, GPIO14 TX / GPIO15 RX)에 turret serdev 드라이버를 바인딩.
+ *
+ * ── 사전 설정 (/boot/firmware/config.txt, 구형은 /boot/config.txt) ──
+ *   enable_uart=1
+ *   dtoverlay=disable-bt          ← BT를 mini-UART로 넘기고 PL011(uart0) 확보
+ *
+ * ── /boot/firmware/cmdline.txt ──
+ *   console=serial0,115200 항목 제거   ← 시리얼 콘솔이 UART0 물지 않게
+ *
+ * ── 빌드 / 적용 ──
+ *   make dtbo
+ *   (런타임) sudo dtoverlay turret-overlay.dtbo
+ *   (영구)   dtbo를 /boot/firmware/overlays/ 에 복사 후
+ *            config.txt 에 dtoverlay=turret-overlay 추가, 재부팅
+ *
+ * 적용 후 disable-bt 로 UART0 를 쓰면 STM32 USART1 과 아래처럼 배선:
+ *   RPi GPIO14(TX, 물리핀8) → STM32 PA10(USART1_RX)
+ *   RPi GPIO15(RX, 물리핀10) ← STM32 PA9(USART1_TX)
+ *   GND 공통
+ */
+
+/dts-v1/;
+/plugin/;
+
+&uart0 {
+	status = "okay";
+
+	turret@0 {
+		compatible = "adts,turret";
+	};
+};

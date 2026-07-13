@@ -1,0 +1,24 @@
+# =====================================================================
+# CODEOWNERS — 폴더별 소유자 (PR 리뷰 자동 지정)
+#   ⚠️ 아래 @핸들은 실제 GitHub 사용자명으로 교체할 것.
+#   (송영빈/이영민 핸들 미확인 → TODO 로 표시)
+# =====================================================================
+
+# 프로토콜 계약 = 이현우 필수 리뷰 (무단 변경 차단)
+/shared/                     @mainvoid00
+
+# 커널 드라이버 + 데몬 코어 = 이현우
+/driver/                     @mainvoid00
+/daemon/core/                @mainvoid00
+
+# 데몬 모듈
+/daemon/modules/tracking/    @mainvoid00            # + @송영빈(TODO 핸들)
+/daemon/modules/meta/        # @이영민(TODO 핸들)
+/daemon/modules/tls/         @lkj000619             # 이광진
+
+# 이미지 보정
+/vision/                     # @이영민(TODO 핸들)
+
+# 정적분석/CI = 강유근 (QA)
+/tools/                      @kangstudy997-byte
+/.github/                    @kangstudy997-byte
