@@ -28,9 +28,26 @@ RPI_CROSS ?= aarch64-linux-gnu-
 # 유저 앱 컴파일러: CROSS_COMPILE 지정 시 그 크로스 gcc, 아니면 호스트
 APP_CC := $(CROSS_COMPILE)gcc
 
+# =====================================================================
+# ★ 방산 표준 커널/유저 컴파일러 보안 및 경고 플래그 강제화
+# =====================================================================
+# [커널 공간] 경고 극대화 및 스택 강도 강화
+EXTRA_CFLAGS += -Wall -Wextra -Werror \
+                -fstack-protector-strong \
+                -D_FORTIFY_SOURCE=2 \
+                -Wformat -Wformat-security
+
+# [유저 공간] 완전한 하드닝 적용 (ASLR, 메모리 보호, 포맷 스트링 방어)
+APP_CFLAGS := -Wall -Wextra -Werror \
+              -fstack-protector-all \
+              -D_FORTIFY_SOURCE=2 \
+              -Wformat -Wformat-security \
+              -fPIE -pie \
+              -z relro -z now
+
 # ── 커널 모듈 (kbuild) ──
 obj-m     += turret_driver.o
-ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared   # protocol.h: ../shared 우선
+ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
 
 # ── 유저 앱: protocol.h 위치 자동 탐색 (../shared 우선) ──
 PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $(wildcard ../protocol.h))
@@ -48,7 +65,7 @@ modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 turret_test: turret_test.c $(PROTO_H)
-	$(APP_CC) -Wall -Wextra -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
+	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
 
 dtbo: turret-overlay.dtbo
 
