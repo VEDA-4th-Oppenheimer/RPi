@@ -35,7 +35,7 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "driver" ]; then
       -I shared -I driver \
       --error-exitcode=1 \
       --template="{severity}|CWE-{cwe}|{file}:{line}| {message} ({id})" \
-      driver/turret_driver.c driver/turret_test.c; then
+      driver/; then # 👈 파일명들을 'driver/' 폴더 경로 하나로 대체합니다!
       
       echo "❌ [driver] Cppcheck 검사에서 위반 사항이 발견되었습니다."
       EXIT_CODE=1

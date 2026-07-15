@@ -35,6 +35,7 @@
  * TURRET_* ioctl 매크로/구조체도 활성화된다. */
 #include "protocol.h"
 
+
 /* ── 디바이스 컨텍스트 ────────────────────────────────── */
 struct turret_dev {
 	struct serdev_device *serdev;
