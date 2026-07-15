@@ -13,20 +13,47 @@ on:
       - 'docs/**'
 
 jobs:
-  # ── 커널 드라이버 정적분석 (cppcheck) ──
+  # ── 커널 드라이버 정적분석 (cppcheck + GCC Warn) ──
   driver-analysis:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v5
 
-      - name: Install Static Analysis Tools
+      - name: Install Static Analysis Tools & Kernel Headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck
+          sudo apt-get install -y cppcheck build-essential linux-headers-generic
 
-      - name: cppcheck (driver + shared)
-        run: bash tools/run_static_analysis.sh
+      # 드라이버 전용 분석 옵션 실행
+      - name: Run cppcheck (driver + shared)
+        run: bash tools/run_static_analysis.sh driver
 
-  # TODO(daemon): 데몬 코드 추가되면 daemon-analysis 잡 추가
-  #   cmake 빌드 + cppcheck(--error-exitcode) + clang-tidy
+      # ★ GCC Warn 조건 적용: GCC Warning을 Error로 격상하여 실제 컴파일 검증 진행
+      - name: Check GCC Warnings (Compile check)
+        run: |
+          cd driver
+          # default 타겟 대신 Makefile에 실제 존재하는 'all' 타겟 사용
+          make KDIR=/lib/modules/$(uname -r)/build EXTRA_CFLAGS="-Wall -Wextra -Werror" clean all
+
+  # ── 데몬 정적분석 (Clang-Tidy + Core Guidelines) ──
+  daemon-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v5
+
+      - name: Install Clang-Tidy & CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy cmake build-essential
+
+      - name: Configure CMake (Generate Compilation Database)
+        run: |
+          mkdir -p daemon/build
+          cd daemon/build
+          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+
+      # 데몬 전용 분석 옵션 실행 (cppcheck 미설치 에러 방지)
+      - name: Run Clang-Tidy Analysis
+        run: bash tools/run_static_analysis.sh daemon

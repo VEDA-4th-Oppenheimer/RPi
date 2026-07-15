@@ -1,0 +1,22 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-security.*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-avoid-magic-numbers
+
+# 방산 기준: 보안 및 치명적 결함 유발 항목은 발견 시 컴파일 에러(Error) 처리
+WarningsAsErrors: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-security.*,
+  cppcoreguidelines-pro-bounds-array-to-pointer-decay
+
+HeaderFilterRegex: 'daemon/.*|shared/.*'
+FormatStyle: none
