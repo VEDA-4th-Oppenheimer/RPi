@@ -238,13 +238,14 @@ static inline proto_u16 proto_crc16(const proto_u8 *data, proto_u16 len)
     proto_u16 crc = 0xFFFFu;
     proto_u16 i;
     proto_u8  b;
-    for (i = 0; i < len; i++) {
-        crc ^= (proto_u16)data[i] << 8;
-        for (b = 0; b < 8; b++) {
-            if (crc & 0x8000u)
+    for (i = 0u; i < len; i++) {
+        crc ^= (proto_u16)((proto_u16)data[i] << 8);
+        for (b = 0u; b < 8u; b++) {
+            if ((crc & 0x8000u) != 0u) {
                 crc = (proto_u16)((crc << 1) ^ 0x1021u);
-            else
+            } else {
                 crc = (proto_u16)(crc << 1);
+            }
         }
     }
     return crc;
