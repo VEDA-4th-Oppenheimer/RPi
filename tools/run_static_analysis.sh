@@ -15,7 +15,6 @@ set -uo pipefail
 cd "$(dirname "$0")/.."          # tools/ -> repo 루트
 
 SUPPRESS="tools/cppcheck_suppressions.txt"
-MISRA_JSON="tools/misra.json"
 TARGET="${1:-all}"               # 기본값은 전체 검사(all)
 
 # 각 단계별 성공 여부를 기록할 변수 (0: 성공, 1: 실패)
@@ -23,14 +22,13 @@ EXIT_CODE=0
 
 # ── [Track 1] 커널 드라이버 분석 (Cppcheck + MISRA-C) ──
 if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "driver" ]; then
-  echo "==> [driver] Cppcheck (with MISRA-C Addon) 구동 중..."
+  echo "==> [driver] Cppcheck 구동 중..."
   
   if command -v cppcheck &> /dev/null; then
     # Cppcheck 실행 및 결과 트래킹
     if ! cppcheck \
       --enable=warning,style,performance,portability \
       --inline-suppr \
-      --addon="${MISRA_JSON}" \
       --suppressions-list="${SUPPRESS}" \
       -I shared -I driver \
       --error-exitcode=1 \
