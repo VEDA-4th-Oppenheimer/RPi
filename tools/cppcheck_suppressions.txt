@@ -7,9 +7,6 @@
 missingInclude
 missingIncludeSystem
 
-# [MISRA-C:2012 Rule 8.7] 커널 콜백 함수 구조체 등록에 따른 미사용 함수 오탐 억제
-# 소명 사유: file_operations 구조체(open, read 등) 등록용 정적 함수임.
-unusedFunction
 
 # 벤더/시스템 경로
 *:*/linux/*
