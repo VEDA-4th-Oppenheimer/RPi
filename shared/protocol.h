@@ -202,6 +202,9 @@ PROTO_PACKED_END
   #define TURRET_GET_STATE   _IOR(TURRET_IOC_MAGIC, 5, struct turret_link_state)
   /* 라이다 거리 조회: 드라이버가 STM32에 CMD_QUERY_DIST 송신 후 CMD_DISTANCE 대기 및 반환 */
   #define TURRET_GET_DISTANCE _IOR(TURRET_IOC_MAGIC, 6, struct proto_distance)
+  /* heartbeat PING 1회 송신(fire-and-forget). 주기(100ms)·타임아웃(300ms) 판정은
+   * 데몬 소유 — 데몬이 tick 마다 호출하고, PONG 도착은 GET_STATE.pong_seq 증가로 확인 */
+  #define TURRET_PING        _IO (TURRET_IOC_MAGIC, 7)
 
   /* 드라이버가 유저에게 노출하는 종합 상태
    * (link_alive 는 heartbeat 로 커널이 판단, 나머지는 STM STATUS 캐시) */
@@ -211,6 +214,9 @@ PROTO_PACKED_END
       proto_s16 cur_theta_ddeg;  /* 최근 보고된 현재 방위각            */
       proto_s16 cur_phi_ddeg;    /* 최근 보고된 현재 고각              */
       proto_u8  last_err;        /* 최근 CMD_ERROR code               */
+      proto_u32 pong_seq;        /* PONG 누적 수신 카운터(드라이버가 증가).
+                                  * 데몬이 tick 간 증가 여부로 PONG 도착을
+                                  * 감지해 자기 CLOCK_MONOTONIC 으로 300ms 판정 */
   };
 
   /* poll() 이벤트 의미(참고):

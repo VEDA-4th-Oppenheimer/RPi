@@ -14,7 +14,9 @@ Module.symvers
 # ── 유저 앱 / 데몬 빌드 산출물 ──
 turret_test
 build/
+build-arm64/
 build_host/
+cmake-build-debug
 compile_commands.json
 *.a
 *.so

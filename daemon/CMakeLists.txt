@@ -1,3 +1,11 @@
+# =====================================================================
+#  A.D.T.S 통합 데몬 빌드
+#   - 네이티브(x86-64, VM 정적분석/스모크):
+#       cmake -B build && cmake --build build
+#   - RPi 4 (aarch64) 배포용 크로스컴파일:
+#       cmake -B build-arm64 -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake
+#       cmake --build build-arm64
+# =====================================================================
 cmake_minimum_required(VERSION 3.16)
 project(VEDA_ADTS_Daemon LANGUAGES CXX)
 
@@ -25,6 +33,11 @@ include_directories(
 )
 
 # 분석 대상 실행 파일 및 소스 지정
+#   core/     = 이현우 (epoll 루프 + 상태머신 + shared_ctx + core_* API)
+#   modules/  = 각 담당 (meta:이영민 / tracking:이현우+송영빈 / tls:팀장) — 현재 STUB
 add_executable(adts_daemon
     core/main.cpp
+    modules/meta/meta_module.cpp
+    modules/tracking/tracking_module.cpp
+    modules/tls/tls_module.cpp
 )

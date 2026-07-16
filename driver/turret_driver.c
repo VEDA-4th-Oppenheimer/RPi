@@ -149,6 +149,10 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 
 				switch (cmd) {
 				case CMD_PONG:
+					/* heartbeat 판정은 데몬 소유. 드라이버는 PONG
+					 * 누적 카운터만 증가시켜 GET_STATE 로 노출한다.
+					 * link_alive 는 테스트앱용 raw 표시(데몬은 무시). */
+					dev->st.pong_seq++;
 					dev->st.link_alive = 1;
 					break;
 				case CMD_HOMED:
@@ -257,6 +261,13 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	case TURRET_DISARM:
 		mutex_lock(&dev->lock);
 		ret = turret_send_frame(dev, CMD_DISARM, NULL, 0);
+		mutex_unlock(&dev->lock);
+		return ret;
+
+	case TURRET_PING:
+		/* 데몬이 주기(100ms) 호출. fire-and-forget, 응답은 PONG→pong_seq */
+		mutex_lock(&dev->lock);
+		ret = turret_send_frame(dev, CMD_PING, NULL, 0);
 		mutex_unlock(&dev->lock);
 		return ret;
 

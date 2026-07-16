@@ -1,22 +1,42 @@
 ---
+# =====================================================================
+# RPi 통합 데몬 (C++17, POSIX 시스템 데몬) clang-tidy 프로파일
+#   - 레이어 적합화(§14 정책 A): 보안·치명결함은 게이트, 시스템 관용구는 억제.
+#   - C++ Core Guidelines는 GSL/RAII 앱 전제라 syscall 직접 호출(ioctl/epoll/
+#     va_list) + 드라이버 ABI 고정 프레임버퍼를 쓰는 데몬엔 부적합한 룰이 다수.
+#   - shared/ 는 드라이버·STM32와 공유하는 순수 C 계약헤더 → 데몬이 못 고침.
+#     HeaderFilterRegex에서 제외(=cppcheck의 shared/protocol.h 억제와 동일 논리).
+# =====================================================================
 Checks: >
   -*,
   bugprone-*,
   cert-*,
   clang-analyzer-security.*,
   cppcoreguidelines-*,
-  modernize-*,
   performance-*,
   portability-*,
   -cppcoreguidelines-owning-memory,
-  -cppcoreguidelines-avoid-magic-numbers
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-macro-to-enum,
+  -cppcoreguidelines-macro-usage,
+  -modernize-avoid-c-arrays,
+  -modernize-macro-to-enum,
+  -modernize-use-trailing-return-type,
+  -bugprone-easily-swappable-parameters
 
-# 방산 기준: 보안 및 치명적 결함 유발 항목은 발견 시 컴파일 에러(Error) 처리
+# 방산 기준: 보안 및 치명적 결함 유발 항목은 발견 시 컴파일 에러(Error) 처리.
+#   단 easily-swappable-parameters(API 모양 지적, 버그 아님)는 게이트에서 제외.
 WarningsAsErrors: >
   bugprone-*,
   cert-*,
   clang-analyzer-security.*,
-  cppcoreguidelines-pro-bounds-array-to-pointer-decay
+  -bugprone-easily-swappable-parameters
 
-HeaderFilterRegex: 'daemon/.*|shared/.*'
+# 데몬 서브디렉토리(core/modules)만 분석 — 'daemon/.*'는 경로 'daemon/../shared/'
+# 까지 매칭해 계약헤더가 새므로, 실제 소스 디렉토리로 앵커링.
+HeaderFilterRegex: 'daemon/(core|modules)/'
 FormatStyle: none

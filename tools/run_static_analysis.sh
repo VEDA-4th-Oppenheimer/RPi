@@ -69,7 +69,10 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "daemon" ]; then
     
     if command -v run-clang-tidy &> /dev/null; then
       # Clang-Tidy 실행 및 결과 트래킹
-      if ! run-clang-tidy -p daemon/build -header-filter="^$(pwd)/(daemon|shared)/.*"; then
+      # header-filter는 .clang-tidy의 HeaderFilterRegex와 일치시킴(단일 진실).
+      #   shared/ = 드라이버·STM32와 공유하는 순수 C 계약헤더라 데몬 분석 대상 아님.
+      #   'daemon/(core|modules)/'로 앵커(경로 'daemon/../shared'가 새지 않도록).
+      if ! run-clang-tidy -p daemon/build -header-filter="^$(pwd)/daemon/(core|modules)/.*"; then
         echo "❌ [daemon] Clang-Tidy 분석에서 위반 사항이 발견되었습니다."
         EXIT_CODE=1
       else
