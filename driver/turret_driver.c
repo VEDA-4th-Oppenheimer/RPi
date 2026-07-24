@@ -1,21 +1,25 @@
 /*
- * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)
+ * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)  [protocol.h v4 스캐너]
  *
- * protocol.h(PROTO_VERSION=3) 프레임으로 STM32(USART1)와 UART 통신.
- * 유저 데몬/테스트앱은 /dev/turret 에 ioctl 로 명령을 내리고,
- * 드라이버가 [SOF|CMD|LEN|PAYLOAD|CRC16] 프레임으로 조립해 UART TX 한다.
+ * protocol.h(PROTO_VERSION=4) 프레임으로 STM32(USART1)와 UART 통신.
+ * 유저 데몬은 /dev/turret 에
+ *   - ioctl 로 제어 명령(HOME / SCAN_START / SCAN_STOP / DISARM / PING)을 내리고,
+ *   - read()/poll() 로 스캔 점 스트림(CMD_SCAN_DATA)을 배치 수신한다.
+ * 드라이버는 [SOF|CMD|LEN|PAYLOAD|CRC16] 프레임으로 조립해 UART TX 하고,
+ * 상행 프레임을 파싱해 스캔 점은 kfifo 로, 통지는 turret_link_state 캐시로 노출한다.
  *
  * 설계 메모:
- *   - SET_TARGET / HOME / SET_MODE / DISARM / QUERY_DIST 는
- *     STM32 가 즉시 ACK 하지 않는 fire-and-forget 명령이다. (완료는
- *     CMD_ALIGNED / CMD_HOMED 등으로 STM 이 비동기 통지)
- *   - 따라서 위 ioctl 들은 프레임을 UART 로 흘려보내고 즉시 반환한다.
- *   - GET_DISTANCE 만 CMD_QUERY_DIST 송신 후 CMD_DISTANCE 상행을
- *     completion 으로 대기한다. (STM 측 미구현이면 -ETIMEDOUT)
- *   - RX 콜백은 STM->RPi 통지(PONG/HOMED/ALIGNED/STATUS/DISTANCE/ERROR)를
- *     파싱해 turret_link_state 캐시를 갱신한다.
+ *   - HOME / SCAN_START / SCAN_STOP / DISARM / PING 은 STM 이 즉시 ACK 하지 않는
+ *     fire-and-forget. 프레임을 UART 로 흘려보내고 즉시 반환한다.
+ *     (완료/상태는 CMD_HOMED / CMD_SCAN_DONE / CMD_STATUS 로 STM 이 비동기 통지)
+ *   - 스캔 점(CMD_SCAN_DATA)은 수만 개라 ioctl 이 아니라 kfifo + read()/poll()
+ *     스트림으로 전달한다. 생산자=serdev RX 콜백, 소비자=read() 의 SPSC 구조라
+ *     kfifo 자체 락으로 충분(별도 lock 불필요).
+ *   - heartbeat: PONG 수신 시 pong_seq 만 증가시킨다. 300ms link_dead 판정은
+ *     데몬(자기 CLOCK_MONOTONIC + pong_seq 증가 감시) 소유(§8 얇은 드라이버).
+ *     따라서 커널은 link_dead 타이머를 돌리지 않는다. link_alive 는 raw 표시.
  *
- * 빌드: RPi에서  make   (Makefile 참조, -I 로 프로젝트 루트 protocol.h)
+ * 빌드: RPi에서  make   (Makefile 참조, -I 로 ../shared/protocol.h)
  * 사용: sudo dtoverlay turret-overlay.dtbo → sudo insmod turret_driver.ko
  *       → /dev/turret 생성
  */
@@ -27,7 +31,9 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
-#include <linux/completion.h>
+#include <linux/kfifo.h>
+#include <linux/poll.h>
+#include <linux/wait.h>
 #include <linux/string.h>
 #include <linux/of.h>
 
@@ -35,17 +41,24 @@
  * TURRET_* ioctl 매크로/구조체도 활성화된다. */
 #include "protocol.h"
 
+/* 스캔 점 링버퍼 깊이. proto_scan_point(6B) × 1024 = 6KB.
+ * 라이다 100Hz(10ms/점) 대비 데몬 read 주기가 넉넉해 오버플로 여유 큼. */
+#define SCAN_FIFO_POINTS 1024
 
 /* ── 디바이스 컨텍스트 ────────────────────────────────── */
 struct turret_dev {
 	struct serdev_device *serdev;
 	struct miscdevice     misc;
 	struct mutex          lock;        /* ioctl 직렬화(TX 프레임 원자성) */
-	struct completion     dist_recv;   /* CMD_DISTANCE 상행 대기         */
+	wait_queue_head_t     rx_wq;       /* read()/poll() 대기            */
+
+	/* 스캔 점 스트림 (생산자=RX 콜백, 소비자=read(), SPSC) */
+	DECLARE_KFIFO(scan_fifo, struct proto_scan_point, SCAN_FIFO_POINTS);
 
 	/* 유저에게 노출하는 종합 상태(캐시) */
 	struct turret_link_state st;
-	struct proto_distance    last_dist;
+	u32  last_point_count;             /* 최근 CMD_SCAN_DONE 총 점 수    */
+	unsigned int notify_pending;       /* HOMED/DONE/STATUS/ERROR 통지   */
 
 	/* 수신 파서 상태 */
 	u8 rx_buf[PROTO_MAX_FRAME];
@@ -89,8 +102,15 @@ static int turret_send_frame(struct turret_dev *dev, u8 cmd,
 	return (ret == total) ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+/* 통지(HOMED/DONE/STATUS/ERROR) 도착 → 데몬이 GET_STATE 로 확인하도록 깨움 */
+static void turret_notify(struct turret_dev *dev)
+{
+	WRITE_ONCE(dev->notify_pending, 1);
+	wake_up_interruptible(&dev->rx_wq);
+}
+
 /* ═══════════════════════════════════════════════════════
- *  serdev 수신 콜백 — STM->RPi 통지 파싱
+ *  serdev 수신 콜백 — STM->RPi 통지/스캔 파싱
  * ═══════════════════════════════════════════════════════ */
 static size_t turret_rx_callback(struct serdev_device *serdev,
 				 const unsigned char *buf, size_t count)
@@ -122,6 +142,7 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 		/* ② 헤더 완성 → 전체 프레임 길이 확정 */
 		if (dev->rx_idx == PROTO_HEADER_LEN) {
 			u8 len = dev->rx_buf[2];
+
 			if (len > PROTO_MAX_PAYLOAD) {      /* CWE-120 */
 				pr_warn("turret: bad LEN %u\n", len);
 				dev->rx_idx = 0;
@@ -143,19 +164,15 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 				u8 cmd = dev->rx_buf[1];
 				const u8 *pl = &dev->rx_buf[PROTO_HEADER_LEN];
 
-				print_hex_dump(KERN_INFO, "turret RX: ",
-					       DUMP_PREFIX_NONE, 16, 1,
-					       dev->rx_buf, dev->rx_need, false);
-
 				switch (cmd) {
 				case CMD_PONG:
+					/* heartbeat: 판정은 데몬. 여기선 카운터만. */
+					dev->st.pong_seq++;
 					dev->st.link_alive = 1;
 					break;
 				case CMD_HOMED:
 					dev->st.flags |= STF_HOMED;
-					break;
-				case CMD_ALIGNED:
-					dev->st.flags |= STF_ALIGNED;
+					turret_notify(dev);
 					break;
 				case CMD_STATUS:
 					if (len == sizeof(struct proto_status)) {
@@ -165,13 +182,29 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 						dev->st.cur_theta_ddeg = s.cur_theta_ddeg;
 						dev->st.cur_phi_ddeg   = s.cur_phi_ddeg;
 						dev->st.flags          = s.flags;
+						turret_notify(dev);
 					}
 					break;
-				case CMD_DISTANCE:
-					if (len == sizeof(struct proto_distance)) {
-						memcpy(&dev->last_dist, pl,
-						       sizeof(dev->last_dist));
-						complete(&dev->dist_recv);
+				case CMD_SCAN_DATA:
+					if (len == sizeof(struct proto_scan_point)) {
+						struct proto_scan_point pt;
+
+						memcpy(&pt, pl, sizeof(pt));
+						/* SPSC: 별도 락 없이 kfifo 로 밀어넣음 */
+						if (!kfifo_put(&dev->scan_fifo, pt))
+							pr_warn_ratelimited(
+								"turret: scan fifo full, point dropped\n");
+						wake_up_interruptible(&dev->rx_wq);
+					}
+					break;
+				case CMD_SCAN_DONE:
+					if (len == sizeof(struct proto_scan_done)) {
+						struct proto_scan_done d;
+
+						memcpy(&d, pl, sizeof(d));
+						dev->last_point_count = d.point_count;
+						dev->st.flags &= ~STF_SCANNING;
+						turret_notify(dev);
 					}
 					break;
 				case CMD_ERROR:
@@ -182,6 +215,7 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 						dev->st.last_err = e.code;
 						pr_warn("turret: STM ERROR code=%u\n",
 							e.code);
+						turret_notify(dev);
 					}
 					break;
 				default:
@@ -207,7 +241,63 @@ static const struct serdev_device_ops turret_serdev_ops = {
 };
 
 /* ═══════════════════════════════════════════════════════
- *  ioctl — 유저 데몬/테스트앱 진입점
+ *  read() — 스캔 점 스트림 (proto_scan_point 배치)
+ * ═══════════════════════════════════════════════════════ */
+/* cppcheck-suppress constParameterCallback  // fops.read ABI: struct file* 비const 고정 */
+static ssize_t turret_read(struct file *f, char __user *ubuf,
+			   size_t count, loff_t *ppos)
+{
+	struct turret_dev *dev = g_dev;
+	unsigned int copied = 0;
+	size_t max;
+	int ret;
+
+	if (!dev)
+		return -ENODEV;
+
+	/* proto_scan_point 정수 배수만 전달(부분 점 금지) */
+	max = count - (count % sizeof(struct proto_scan_point));
+	if (max == 0)
+		return -EINVAL;      /* 버퍼가 1점보다 작음 */
+
+	if (kfifo_is_empty(&dev->scan_fifo)) {
+		if (f->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		ret = wait_event_interruptible(dev->rx_wq,
+					       !kfifo_is_empty(&dev->scan_fifo));
+		if (ret)
+			return ret;  /* -ERESTARTSYS */
+	}
+
+	ret = kfifo_to_user(&dev->scan_fifo, ubuf, max, &copied);
+	if (ret)
+		return ret;
+	return copied;
+}
+
+/* ═══════════════════════════════════════════════════════
+ *  poll() — 스캔 점/통지 도착, link_dead 대기
+ * ═══════════════════════════════════════════════════════ */
+static __poll_t turret_poll(struct file *f, struct poll_table_struct *wait)
+{
+	struct turret_dev *dev = g_dev;
+	__poll_t mask = 0;
+
+	if (!dev)
+		return EPOLLERR;
+
+	poll_wait(f, &dev->rx_wq, wait);
+
+	if (!kfifo_is_empty(&dev->scan_fifo))
+		mask |= EPOLLIN | EPOLLRDNORM;      /* 스캔 점 있음 */
+	if (READ_ONCE(dev->notify_pending))
+		mask |= EPOLLIN;                    /* 통지 → GET_STATE 확인 */
+
+	return mask;
+}
+
+/* ═══════════════════════════════════════════════════════
+ *  ioctl — 유저 데몬/테스트앱 제어 진입점
  * ═══════════════════════════════════════════════════════ */
 static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
@@ -219,40 +309,40 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		return -ENODEV;
 
 	switch (cmd) {
-	case TURRET_SET_TARGET: {
-		struct proto_target t;
-
-		if (copy_from_user(&t, uarg, sizeof(t)))
-			return -EFAULT;
-		if (t.theta_ddeg < THETA_MIN || t.theta_ddeg > THETA_MAX ||
-		    t.phi_ddeg   < PHI_MIN   || t.phi_ddeg   > PHI_MAX)
-			return -EINVAL;
-
-		mutex_lock(&dev->lock);
-		ret = turret_send_frame(dev, CMD_SET_TARGET, &t, sizeof(t));
-		mutex_unlock(&dev->lock);
-		return ret;
-	}
-
 	case TURRET_HOME:
 		mutex_lock(&dev->lock);
 		ret = turret_send_frame(dev, CMD_HOME, NULL, 0);
 		mutex_unlock(&dev->lock);
 		return ret;
 
-	case TURRET_SET_MODE: {
-		struct proto_mode m;
+	case TURRET_SCAN_START: {
+		struct proto_scan_start ss;
 
-		if (copy_from_user(&m, uarg, sizeof(m)))
+		if (copy_from_user(&ss, uarg, sizeof(ss)))
 			return -EFAULT;
-		if (m.mode > MODE_TRACK)
+		/* 각도 범위 검증: θ 0~3599, φ -900~+900, step>0 */
+		if (ss.theta_start_ddeg < THETA_MIN ||
+		    ss.theta_start_ddeg > THETA_MAX ||
+		    ss.theta_end_ddeg   < THETA_MIN ||
+		    ss.theta_end_ddeg   > THETA_MAX ||
+		    ss.phi_start_ddeg   < PHI_MIN   ||
+		    ss.phi_start_ddeg   > PHI_MAX   ||
+		    ss.phi_end_ddeg     < PHI_MIN   ||
+		    ss.phi_end_ddeg     > PHI_MAX   ||
+		    ss.step_ddeg == 0)
 			return -EINVAL;
 
 		mutex_lock(&dev->lock);
-		ret = turret_send_frame(dev, CMD_SET_MODE, &m, sizeof(m));
+		ret = turret_send_frame(dev, CMD_SCAN_START, &ss, sizeof(ss));
 		mutex_unlock(&dev->lock);
 		return ret;
 	}
+
+	case TURRET_SCAN_STOP:
+		mutex_lock(&dev->lock);
+		ret = turret_send_frame(dev, CMD_SCAN_STOP, NULL, 0);
+		mutex_unlock(&dev->lock);
+		return ret;
 
 	case TURRET_DISARM:
 		mutex_lock(&dev->lock);
@@ -261,27 +351,15 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		return ret;
 
 	case TURRET_GET_STATE:
+		WRITE_ONCE(dev->notify_pending, 0);   /* 통지 소비 */
 		if (copy_to_user(uarg, &dev->st, sizeof(dev->st)))
 			return -EFAULT;
 		return 0;
 
-	case TURRET_GET_DISTANCE:
+	case TURRET_PING:
+		/* 데몬이 100ms tick 마다 호출. 응답 PONG 은 pong_seq 로 감지 */
 		mutex_lock(&dev->lock);
-		reinit_completion(&dev->dist_recv);
-		ret = turret_send_frame(dev, CMD_QUERY_DIST, NULL, 0);
-		if (ret < 0) {
-			mutex_unlock(&dev->lock);
-			return ret;
-		}
-		/* CMD_DISTANCE 상행 대기(500ms) */
-		if (!wait_for_completion_timeout(&dev->dist_recv,
-						 msecs_to_jiffies(500))) {
-			mutex_unlock(&dev->lock);
-			pr_warn("turret: DISTANCE timeout (STM 미응답)\n");
-			return -ETIMEDOUT;
-		}
-		ret = copy_to_user(uarg, &dev->last_dist,
-				   sizeof(dev->last_dist)) ? -EFAULT : 0;
+		ret = turret_send_frame(dev, CMD_PING, NULL, 0);
 		mutex_unlock(&dev->lock);
 		return ret;
 
@@ -293,6 +371,8 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 static const struct file_operations turret_fops = {
 	.owner          = THIS_MODULE,
 	.unlocked_ioctl = turret_ioctl,
+	.read           = turret_read,
+	.poll           = turret_poll,
 };
 
 /* ═══════════════════════════════════════════════════════
@@ -309,7 +389,8 @@ static int turret_probe(struct serdev_device *serdev)
 
 	dev->serdev = serdev;
 	mutex_init(&dev->lock);
-	init_completion(&dev->dist_recv);
+	init_waitqueue_head(&dev->rx_wq);
+	INIT_KFIFO(dev->scan_fifo);
 
 	serdev_device_set_drvdata(serdev, dev);
 	serdev_device_set_client_ops(serdev, &turret_serdev_ops);
@@ -337,7 +418,8 @@ static int turret_probe(struct serdev_device *serdev)
 	}
 
 	g_dev = dev;
-	dev_info(&serdev->dev, "turret probed → /dev/turret ready\n");
+	dev_info(&serdev->dev, "turret probed → /dev/turret ready (proto v%u)\n",
+		 PROTO_VERSION);
 	return 0;
 }
 
@@ -370,6 +452,7 @@ static struct serdev_device_driver turret_drv = {
 };
 module_serdev_device_driver(turret_drv);
 
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("이현우");
-MODULE_DESCRIPTION("/dev/turret — RPi<->STM32 UART turret protocol driver");
+MODULE_DESCRIPTION("/dev/turret — RPi<->STM32 UART LiDAR scanner protocol driver (v4)");
