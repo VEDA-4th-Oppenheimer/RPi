@@ -28,7 +28,7 @@
 &uart0 {
 	status = "okay";
 
-	turret@0 {
+	turret {
 		compatible = "adts,turret";
 	};
 };

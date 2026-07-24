@@ -1,0 +1,3 @@
+/home/mainvoid/final_project/RPi/daemon/build-arm64/CMakeFiles/adts_daemon.dir
+/home/mainvoid/final_project/RPi/daemon/build-arm64/CMakeFiles/edit_cache.dir
+/home/mainvoid/final_project/RPi/daemon/build-arm64/CMakeFiles/rebuild_cache.dir
