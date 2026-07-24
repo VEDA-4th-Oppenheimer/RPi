@@ -1,1 +1,0 @@
-/usr/bin/aarch64-linux-gnu-g++  -Wall -Wextra -Werror -O2 -fstack-protector-all -D_FORTIFY_SOURCE=2 -fPIE  -pie -z relro -z now CMakeFiles/adts_daemon.dir/core/main.cpp.o CMakeFiles/adts_daemon.dir/modules/meta/meta_module.cpp.o CMakeFiles/adts_daemon.dir/modules/tracking/tracking_module.cpp.o CMakeFiles/adts_daemon.dir/modules/tls/tls_module.cpp.o -o adts_daemon 
