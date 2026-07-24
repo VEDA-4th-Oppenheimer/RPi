@@ -243,6 +243,7 @@ static const struct serdev_device_ops turret_serdev_ops = {
 /* ═══════════════════════════════════════════════════════
  *  read() — 스캔 점 스트림 (proto_scan_point 배치)
  * ═══════════════════════════════════════════════════════ */
+/* cppcheck-suppress constParameterCallback  // fops.read ABI: struct file* 비const 고정 */
 static ssize_t turret_read(struct file *f, char __user *ubuf,
 			   size_t count, loff_t *ppos)
 {
