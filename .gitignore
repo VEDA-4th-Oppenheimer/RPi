@@ -15,6 +15,7 @@ Module.symvers
 turret_test
 build/
 build_host/
+build-arm64/
 compile_commands.json
 *.a
 *.so
