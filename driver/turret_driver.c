@@ -179,8 +179,8 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 						struct proto_status s;
 
 						memcpy(&s, pl, sizeof(s));
-						dev->st.cur_theta_ddeg = s.cur_theta_ddeg;
-						dev->st.cur_phi_ddeg   = s.cur_phi_ddeg;
+						dev->st.cur_pan_ddeg = s.cur_pan_ddeg;
+						dev->st.cur_tilt_ddeg   = s.cur_tilt_ddeg;
 						dev->st.flags          = s.flags;
 						turret_notify(dev);
 					}
@@ -321,14 +321,14 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&ss, uarg, sizeof(ss)))
 			return -EFAULT;
 		/* 각도 범위 검증: θ 0~3599, φ -900~+900, step>0 */
-		if (ss.theta_start_ddeg < THETA_MIN ||
-		    ss.theta_start_ddeg > THETA_MAX ||
-		    ss.theta_end_ddeg   < THETA_MIN ||
-		    ss.theta_end_ddeg   > THETA_MAX ||
-		    ss.phi_start_ddeg   < PHI_MIN   ||
-		    ss.phi_start_ddeg   > PHI_MAX   ||
-		    ss.phi_end_ddeg     < PHI_MIN   ||
-		    ss.phi_end_ddeg     > PHI_MAX   ||
+		if (ss.pan_start_ddeg < PAN_MIN ||
+		    ss.pan_start_ddeg > PAN_MAX ||
+		    ss.pan_end_ddeg   < PAN_MIN ||
+		    ss.pan_end_ddeg   > PAN_MAX ||
+		    ss.tilt_start_ddeg   < TILT_MIN   ||
+		    ss.tilt_start_ddeg   > TILT_MAX   ||
+		    ss.tilt_end_ddeg     < TILT_MIN   ||
+		    ss.tilt_end_ddeg     > TILT_MAX   ||
 		    ss.step_ddeg == 0)
 			return -EINVAL;
 
