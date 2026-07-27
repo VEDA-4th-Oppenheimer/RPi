@@ -8,7 +8,7 @@
  *
  *  ★ 단일 진실 소스. 수정 시 3자 모두 재빌드하고 VERSION을 올린다.
  *  ★ v4: 안티드론 조준(SET_TARGET/ALIGNED/MODE/DISTANCE) 제거,
- *        스캔 스트림(SCAN_START/STOP/DATA/DONE) 추가. phi 부호각 확장.
+ *        스캔 스트림(SCAN_START/STOP/DATA/DONE) 추가. tilt 부호각 확장.
  *
  *  담당: 이현우 (RPi↔STM32 프로토콜 관리)
  * ==========================================================================*/
@@ -70,15 +70,15 @@ enum proto_err_code {
 
 /* 4. 각도 규약
  *   - 단위: 0.1도 (deci-degree). 예) 1234 => 123.4도
- *   - theta (팬 방위): 절대각 0 ~ 3599. 홈=리밋스위치+스텝카운트.
- *   - phi   (틸트 고각): 절대각 -900 ~ +900 (부호). 홈/각도=MT6701 엔코더.
+ *   - pan  (팬 방위): 절대각 0 ~ 3599. 홈=리밋스위치+스텝카운트.
+ *   - tilt (틸트 고각): 절대각 -900 ~ +900 (부호). 홈/각도=MT6701 엔코더.
  *   - 홈(CMD_HOMED) 전 SCAN_START 은 STM이 무시하고 ERR_NOT_HOMED 응답.
- *   - (θ,φ,d) -> (x,y,z) 변환은 RPi 데몬. 원점=천장 팬/틸트 축 교점. */
+ *   - (pan,tilt,d) -> (x,y,z) 변환은 RPi 데몬. 원점=천장 팬/틸트 축 교점. */
 #define ANGLE_SCALE       10
-#define THETA_MIN         0
-#define THETA_MAX         3599
-#define PHI_MIN           (-900)   /* -90.0도 (v3의 0 에서 확장) */
-#define PHI_MAX           900      /* +90.0도                    */
+#define PAN_MIN           0
+#define PAN_MAX           3599
+#define TILT_MIN          (-900)   /* -90.0도 (v3의 0 에서 확장) */
+#define TILT_MAX          900      /* +90.0도                    */
 
 /* 5. PAYLOAD 구조체 (모두 __packed + 리틀엔디언)
  *  - struct padding 을 생성하지 않기 위해 사용
@@ -102,17 +102,17 @@ PROTO_PACKED_BEGIN
 
 /* CMD_SCAN_START payload : 스캔 범위·격자 (10B) */
 struct proto_scan_start {
-    proto_s16 theta_start_ddeg;  /* 팬 시작각 (0.1도)            */
-    proto_s16 theta_end_ddeg;    /* 팬 끝각                      */
-    proto_s16 phi_start_ddeg;    /* 틸트 시작각 (0.1도, 부호)    */
-    proto_s16 phi_end_ddeg;      /* 틸트 끝각                    */
+    proto_s16 pan_start_ddeg;  /* 팬 시작각 (0.1도)            */
+    proto_s16 pan_end_ddeg;    /* 팬 끝각                      */
+    proto_s16 tilt_start_ddeg;    /* 틸트 시작각 (0.1도, 부호)    */
+    proto_s16 tilt_end_ddeg;      /* 틸트 끝각                    */
     proto_u16 step_ddeg;         /* 격자 간격 (0.1도, 10=1.0도)  */
 } PROTO_PACKED;
 
 /* CMD_SCAN_DATA payload : 스캔 점 하나 (6B) */
 struct proto_scan_point {
-    proto_s16 theta_ddeg;   /* 방위 (0.1도, 스텝카운트 래치)     */
-    proto_s16 phi_ddeg;     /* 고각 (0.1도, 엔코더 래치, 부호)   */
+    proto_s16 pan_ddeg;   /* 방위 (0.1도, 스텝카운트 래치)     */
+    proto_s16 tilt_ddeg;     /* 고각 (0.1도, 엔코더 래치, 부호)   */
     proto_u16 d_mm;         /* 거리 (mm)                         */
 } PROTO_PACKED;
 
@@ -123,8 +123,8 @@ struct proto_scan_done {
 
 /* CMD_STATUS payload : STM -> RPi 현재 상태 (5B) */
 struct proto_status {
-    proto_s16 cur_theta_ddeg;  /* 현재 방위 (스텝카운트)         */
-    proto_s16 cur_phi_ddeg;    /* 현재 고각 (엔코더, 부호)       */
+    proto_s16 cur_pan_ddeg;  /* 현재 방위 (스텝카운트)         */
+    proto_s16 cur_tilt_ddeg;    /* 현재 고각 (엔코더, 부호)       */
     proto_u8  flags;           /* bit0=homed, bit1=scanning      */
 } PROTO_PACKED;
 
@@ -165,8 +165,8 @@ PROTO_PACKED_END
   struct turret_link_state {
       proto_u8  link_alive;      /* 1=heartbeat 정상, 0=link_dead     */
       proto_u8  flags;           /* STM proto_status.flags 최신값      */
-      proto_s16 cur_theta_ddeg;  /* 최근 보고된 현재 방위각            */
-      proto_s16 cur_phi_ddeg;    /* 최근 보고된 현재 고각 (부호)       */
+      proto_s16 cur_pan_ddeg;  /* 최근 보고된 현재 방위각            */
+      proto_s16 cur_tilt_ddeg;    /* 최근 보고된 현재 고각 (부호)       */
       proto_u8  last_err;        /* 최근 CMD_ERROR code               */
       proto_u32 pong_seq;        /* PONG 누적 카운터 (heartbeat 감지) */
   };

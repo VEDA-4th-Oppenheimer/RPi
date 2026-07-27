@@ -44,19 +44,19 @@ static void usage(const char *p)
 	"  %s ping\n"
 	"  %s state\n"
 	"  %s stream [timeout_ms]\n"
-	"    theta 0..%d, phi %d..%d (0.1deg), step>0 (10=1.0deg)\n",
-	p, p, THETA_MAX, PHI_MIN, PHI_MAX, p, p, p, p, p,
-	THETA_MAX, PHI_MIN, PHI_MAX);
+	"    pan 0..%d, tilt %d..%d (0.1deg), step>0 (10=1.0deg)\n",
+	p, p, PAN_MAX, TILT_MIN, TILT_MAX, p, p, p, p, p,
+	PAN_MAX, TILT_MIN, TILT_MAX);
 }
 
 static void print_state(const struct turret_link_state *s)
 {
 	printf("link_alive=%u flags=0x%02X(homed=%d scanning=%d) "
-	       "theta=%d phi=%d last_err=%u pong_seq=%u\n",
+	       "pan=%d tilt=%d last_err=%u pong_seq=%u\n",
 	       s->link_alive, s->flags,
 	       (s->flags & STF_HOMED) ? 1 : 0,
 	       (s->flags & STF_SCANNING) ? 1 : 0,
-	       s->cur_theta_ddeg, s->cur_phi_ddeg, s->last_err, s->pong_seq);
+	       s->cur_pan_ddeg, s->cur_tilt_ddeg, s->last_err, s->pong_seq);
 }
 
 /* poll()+read() 로 스캔 점 스트림 수신. SCAN_DONE(스캐닝 해제) or 타임아웃까지. */
@@ -97,8 +97,8 @@ static int do_stream(int fd, int timeout_ms)
 				/* 배치 끝 점만 샘플 출력(플러딩 방지) */
 				printf("  +%d점 (누적 %lu)  마지막: θ=%d φ=%d d=%umm\n",
 				       cnt, total,
-				       pts[cnt - 1].theta_ddeg,
-				       pts[cnt - 1].phi_ddeg,
+				       pts[cnt - 1].pan_ddeg,
+				       pts[cnt - 1].tilt_ddeg,
 				       pts[cnt - 1].d_mm);
 			} else if (n < 0 && errno != EAGAIN) {
 				perror("read");
@@ -146,18 +146,18 @@ int main(int argc, char *argv[])
 	}
 	else if (!strcmp(argv[1], "scan")) {
 		struct proto_scan_start ss = {
-			.theta_start_ddeg = 0,
-			.theta_end_ddeg   = THETA_MAX,
-			.phi_start_ddeg   = PHI_MIN,
-			.phi_end_ddeg     = PHI_MAX,
+			.pan_start_ddeg = 0,
+			.pan_end_ddeg   = PAN_MAX,
+			.tilt_start_ddeg   = TILT_MIN,
+			.tilt_end_ddeg     = TILT_MAX,
 			.step_ddeg        = 10,        /* 1.0도 격자 */
 		};
 
 		if (argc >= 7) {
-			ss.theta_start_ddeg = (proto_s16)atoi(argv[2]);
-			ss.theta_end_ddeg   = (proto_s16)atoi(argv[3]);
-			ss.phi_start_ddeg   = (proto_s16)atoi(argv[4]);
-			ss.phi_end_ddeg     = (proto_s16)atoi(argv[5]);
+			ss.pan_start_ddeg = (proto_s16)atoi(argv[2]);
+			ss.pan_end_ddeg   = (proto_s16)atoi(argv[3]);
+			ss.tilt_start_ddeg   = (proto_s16)atoi(argv[4]);
+			ss.tilt_end_ddeg     = (proto_s16)atoi(argv[5]);
 			ss.step_ddeg        = (proto_u16)atoi(argv[6]);
 		}
 		if (ioctl(fd, TURRET_SCAN_START, &ss) < 0) {
@@ -167,8 +167,8 @@ int main(int argc, char *argv[])
 			rc = 1;
 		} else {
 			printf("✓ CMD_SCAN_START θ[%d..%d] φ[%d..%d] step=%u\n",
-			       ss.theta_start_ddeg, ss.theta_end_ddeg,
-			       ss.phi_start_ddeg, ss.phi_end_ddeg, ss.step_ddeg);
+			       ss.pan_start_ddeg, ss.pan_end_ddeg,
+			       ss.tilt_start_ddeg, ss.tilt_end_ddeg, ss.step_ddeg);
 		}
 	}
 	else if (!strcmp(argv[1], "stop")) {
