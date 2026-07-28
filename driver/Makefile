@@ -47,7 +47,12 @@ APP_CFLAGS := -Wall -Wextra -Werror \
 
 # ── 커널 모듈 (kbuild) ──
 obj-m     += turret_driver.o
+<<<<<<< Updated upstream
 ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
+=======
+obj-m     += imu_driver.o
+ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared   # protocol.h: ../shared 우선
+>>>>>>> Stashed changes
 
 # ── 유저 앱: protocol.h 위치 자동 탐색 (../shared 우선) ──
 PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $(wildcard ../protocol.h))
@@ -55,7 +60,7 @@ PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $
 # ── 타겟 ──
 .PHONY: all rpi modules clean dtbo
 
-all: modules turret_test
+all: modules turret_test imu_test
 
 # 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + turret_test 둘 다 arm64
 rpi:
@@ -63,6 +68,9 @@ rpi:
 
 modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+imu_test: imu_test.c
+	$(APP_CC) -Wall -Wextra -I. -I.. -I../shared -o $@ $< -lm
 
 turret_test: turret_test.c $(PROTO_H)
 	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
@@ -74,4 +82,8 @@ turret-overlay.dtbo: turret-overlay.dts
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
+<<<<<<< Updated upstream
 	rm -f turret_test turret-overlay.dtbo
+=======
+	rm -f turret_test imu_test turret-overlay.dtbo
+>>>>>>> Stashed changes
