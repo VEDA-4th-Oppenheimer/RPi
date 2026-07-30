@@ -660,6 +660,8 @@ static void write_json(struct core *c)
         "    \"sweep_axis\": \"tilt\",\n"
         "    \"index_axis\": \"pan\",\n"
         "    \"tilt_zero\": \"nadir\",\n"
+        "    \"angle_source\": \"step_count\",\n"
+        "    \"home_method\": \"absolute_encoder\",\n"
         "    \"pan_range_ddeg\": [%d, %d],\n"
         "    \"tilt_range_ddeg\": [%d, %d],\n"
         "    \"step_ddeg\": %u,\n"
@@ -669,7 +671,10 @@ static void write_json(struct core *c)
         "    \"checksum_error_count\": 0,\n"
         "    \"duplicate_cell_count\": %u,\n"
         "    \"out_of_range_angle_count\": %u,\n"
-        "    \"encoder_gap_count\": 0,\n"
+        /* 0 이 아니라 null 이다. STM 이 틸트 끝점 엔코더 대조 횟수를
+         * 상행하는 경로가 아직 없어 데몬은 이 값을 **모른다**. 0 으로
+         * 적으면 "대조에서 한 번도 안 틀어졌다" 는 거짓 주장이 된다. */
+        "    \"encoder_gap_count\": null,\n"
         "    \"dis_status_histogram\": "
         "{ \"0\": %u, \"1\": %u, \"2\": %u, \"other\": %u }\n"
         "  },\n"
