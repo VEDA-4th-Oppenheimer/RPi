@@ -216,6 +216,9 @@ PROTO_PACKED_END
   #define TURRET_SCAN_START  _IOW(TURRET_IOC_MAGIC, 2, struct proto_scan_start)
   #define TURRET_SCAN_STOP   _IO (TURRET_IOC_MAGIC, 3)
   #define TURRET_DISARM      _IO (TURRET_IOC_MAGIC, 4)
+  /* ⚠️ v5 에서 turret_link_state 가 커져 _IOR 인코딩(크기 필드)이 바뀌었다.
+   *    구버전 유저스페이스가 신버전 드라이버를 때리면 -ENOTTY 로 즉시 실패한다
+   *    (조용한 구조체 오해석보다 안전). 드라이버·데몬은 같이 재빌드할 것. */
   #define TURRET_GET_STATE   _IOR(TURRET_IOC_MAGIC, 5, struct turret_link_state)
   /* heartbeat PING 1회 송신(fire-and-forget). 주기·타임아웃 판정은 데몬 소유,
    * PONG 도착은 GET_STATE.pong_seq 증가로 감지. */
@@ -224,10 +227,18 @@ PROTO_PACKED_END
   struct turret_link_state {
       proto_u8  link_alive;      /* 1=heartbeat 정상, 0=link_dead     */
       proto_u8  flags;           /* STM proto_status.flags 최신값      */
-      proto_s16 cur_pan_ddeg;  /* 최근 보고된 현재 방위각            */
-      proto_s16 cur_tilt_ddeg;    /* 최근 보고된 현재 고각 (부호)       */
+      proto_s16 cur_pan_ddeg;    /* 최근 보고된 현재 방위각            */
+      proto_s16 cur_tilt_ddeg;   /* 최근 보고된 현재 고각 (부호)       */
       proto_u8  last_err;        /* 최근 CMD_ERROR code               */
       proto_u32 pong_seq;        /* PONG 누적 카운터 (heartbeat 감지) */
+
+      /* v5: 최근 CMD_HOMED 결과 캐시. flags 에 STF_HOMED 가 서면 유효.
+       * 데몬이 산출물 헤더에 provenance 로 기록한다 — 영점 상수가 나중에
+       * 틀렸다고 밝혀져도 raw 카운트로부터 각도를 재계산할 수 있게. */
+      proto_u16 home_pan_encoder_raw;   /* MT6701 14비트 (0~16383)      */
+      proto_u16 home_tilt_encoder_raw;
+      proto_s16 home_pan_ddeg;          /* 영점 적용 후 각도 (0.1도)    */
+      proto_s16 home_tilt_ddeg;
   };
 
   /* poll(): POLLIN = 스캔 점/통지 도착, POLLERR = link_dead */
