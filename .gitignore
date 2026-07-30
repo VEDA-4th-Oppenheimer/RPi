@@ -4,6 +4,8 @@
 *.mod
 *.mod.c
 *.mod.o
+*.d
+.*.d
 *.symvers
 modules.order
 Module.symvers
