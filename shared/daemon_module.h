@@ -75,8 +75,20 @@ struct scan_request {
     int16_t  tilt_start_ddeg;   /* 틸트 시작각 (TILT_MIN..TILT_MAX, 부호)     */
     int16_t  tilt_end_ddeg;     /* 틸트 끝각                                  */
     uint16_t step_ddeg;         /* 격자 간격 (10 = 1.0도, 빔 FOV 상 1도 권장) */
+    int32_t  sensor_height_mm;  /* 지면→라이다 높이 (아래 설명)               */
     uint8_t  valid;             /* 1=요청 있음 (코어가 소비 후 0 으로 클리어) */
 };
+
+/* sensor_height_mm — 지면에서 라이다 회전축까지의 높이. 설치 시 실측해 넣는다.
+ *
+ *   ⚠️ 이 값은 좌표 계산에 **들어가지 않는다.** 산출물의 frame 은 lidar_scan,
+ *     즉 원점이 라이다 자신이므로 tilt=0 인 점의 y 는 0 이어야 한다. 높이를
+ *     좌표에 반영하면 이름과 내용이 어긋난다(2026-07-29 실제로 발생한 버그 —
+ *     모든 y 가 -1.2m 로 찍혔고 그건 사실상 actuator_base 좌표였다).
+ *
+ *   용도는 메타데이터다. 산출물 헤더에 scan.sensor_height_m 으로 실려 나가고,
+ *   소비자(카메라 단)가 바닥평면을 잡거나 다른 좌표계로 옮길 때 쓴다.
+ *   0 이면 "모름"으로 간주된다. */
 
 /* 스캔 진행 상황. 코어가 씀, mqtt_module 이 읽어 scan/status 로 발행 */
 struct scan_progress {
