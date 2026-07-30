@@ -1,7 +1,7 @@
 /*
- * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)  [protocol.h v4 스캐너]
+ * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)  [protocol.h v5 스캐너]
  *
- * protocol.h(PROTO_VERSION=4) 프레임으로 STM32(USART1)와 UART 통신.
+ * protocol.h(PROTO_VERSION=5) 프레임으로 STM32(USART1)와 UART 통신.
  * 유저 데몬은 /dev/turret 에
  *   - ioctl 로 제어 명령(HOME / SCAN_START / SCAN_STOP / DISARM / PING)을 내리고,
  *   - read()/poll() 로 스캔 점 스트림(CMD_SCAN_DATA)을 배치 수신한다.
@@ -41,8 +41,10 @@
  * TURRET_* ioctl 매크로/구조체도 활성화된다. */
 #include "protocol.h"
 
-/* 스캔 점 링버퍼 깊이. proto_scan_point(6B) × 1024 = 6KB.
- * 라이다 100Hz(10ms/점) 대비 데몬 read 주기가 넉넉해 오버플로 여유 큼. */
+/* 스캔 점 링버퍼 깊이. protocol.h v5 에서 proto_scan_point 가 6B -> 18B 로
+ * 커져 18B × 1024 = 18KB (디바이스 구조체에 내장, kzalloc).
+ * 라이다 100Hz(10ms/점) 기준 약 10초분 — 데몬 read 주기 대비 여유 큼.
+ * ⚠️ 구조체 크기는 protocol.h 의 컴파일 타임 assert 가 지킨다. */
 #define SCAN_FIFO_POINTS 1024
 
 /* ── 디바이스 컨텍스트 ────────────────────────────────── */
@@ -203,6 +205,8 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 
 						memcpy(&d, pl, sizeof(d));
 						dev->last_point_count = d.point_count;
+						/* 스캔 종료 → 유저가 GET_STATE 로 감지한다.
+						 * (설정은 SCAN_START ioctl 에서) */
 						dev->st.flags &= ~STF_SCANNING;
 						turret_notify(dev);
 					}
@@ -333,7 +337,21 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 
 		mutex_lock(&dev->lock);
+		/* ★ 새 스캔 시작 전 이전 스캔의 잔여 점을 버린다.
+		 * 안 비우면 이전 실행(다른 tilt/거리)의 점이 이번 .pcd 에 섞여
+		 * 좌표가 뒤죽박죽인 파일이 나온다. 실측으로 확인된 버그. */
+		kfifo_reset(&dev->scan_fifo);
+		dev->last_point_count = 0;
+		/* ★ STF_SCANNING 을 여기서 세운다.
+		 * STM 은 CMD_STATUS 를 주기 발행하지 않으므로 이 플래그가 계속 0 이었고,
+		 * 유저(데몬)가 "scanning==0 && points>0" 로 완료를 판정하다 보니
+		 * 첫 배치 몇 점만 받고 즉시 끝나 .pcd 가 4점짜리로 끊겼다(실측 확인).
+		 * 명령을 내린 시점에 커널이 직접 세우면 유실 없이 확정된다.
+		 * 해제는 CMD_SCAN_DONE 수신 시. */
+		dev->st.flags |= STF_SCANNING;
 		ret = turret_send_frame(dev, CMD_SCAN_START, &ss, sizeof(ss));
+		if (ret < 0)
+			dev->st.flags &= ~STF_SCANNING;   /* 송신 실패 시 원복 */
 		mutex_unlock(&dev->lock);
 		return ret;
 	}

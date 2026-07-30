@@ -75,8 +75,22 @@ struct scan_request {
     int16_t  tilt_start_ddeg;   /* 틸트 시작각 (TILT_MIN..TILT_MAX, 부호)     */
     int16_t  tilt_end_ddeg;     /* 틸트 끝각                                  */
     uint16_t step_ddeg;         /* 격자 간격 (10 = 1.0도, 빔 FOV 상 1도 권장) */
+    int32_t  z_offset_mm;       /* 지면 기준 라이다 높이 (아래 설명)          */
     uint8_t  valid;             /* 1=요청 있음 (코어가 소비 후 0 으로 클리어) */
 };
+
+/* z_offset_mm — 1축 임시 스캔(책 쌓기) 지원
+ *
+ *   2축 기구가 없어 틸트를 못 쓰는 동안, 터렛 높이를 물리적으로 올려가며
+ *   수평 슬라이스를 여러 장 떠서 3D 를 구성한다.
+ *     z = d·sin(tilt) + z_offset_mm
+ *   틸트=0 이면 z = z_offset_mm 이 되어 레이어 높이가 그대로 z 가 된다.
+ *
+ *   레이어별로 z_offset_mm = 지면→라이다 초기높이 + Σ(쌓은 높이) 를 넣는다.
+ *   2축 기구 완성 후에는 0 으로 두면 원래 동작과 동일하다(회귀 없음).
+ *
+ *   ⚠️ 레이어 간 정합을 위해 터렛 위치와 pan=0 기준 방향이 유지돼야 한다.
+ */
 
 /* 스캔 진행 상황. 코어가 씀, mqtt_module 이 읽어 scan/status 로 발행 */
 struct scan_progress {
