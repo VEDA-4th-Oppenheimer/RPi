@@ -4,6 +4,8 @@
 *.mod
 *.mod.c
 *.mod.o
+*.d
+.*.d
 *.symvers
 modules.order
 Module.symvers
@@ -14,8 +16,10 @@ Module.symvers
 # ── 유저 앱 / 데몬 빌드 산출물 ──
 turret_test
 build/
-build_host/
 build-arm64/
+build_host/
+cmake-build-debug/
+cmake-build-*/
 compile_commands.json
 *.a
 *.so
@@ -25,3 +29,4 @@ compile_commands.json
 .cache/
 .vscode/
 .DS_Store
+.claude
