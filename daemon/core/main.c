@@ -168,6 +168,11 @@ struct core {
     int16_t  home_pan_ddeg;
     int16_t  home_tilt_ddeg;
 
+    /* 스캔 전 자동 홈. STM 은 홈 전 SCAN_START 를 ERR_NOT_HOMED 로 거절하므로
+     * 요청이 들어오면 먼저 홈을 세우고 STF_HOMED 를 기다린다. */
+    uint64_t home_req_first_ms;   /* 첫 요청 시각 (0 = 요청 안 함)  */
+    uint64_t home_req_last_ms;    /* 마지막 송신 시각 (재시도 간격) */
+
     /* 스캔 출력 — organized 격자 버퍼링 후 JSON + PCD 동시 산출.
      *
      * 스트리밍 append 가 아니라 격자에 담는 이유:
@@ -216,6 +221,12 @@ struct core {
 /* SCAN_DONE 을 놓쳤을 때를 대비한 안전망: 이 시간 동안 점이 하나도 안 오면 종료.
  * 라이다 100Hz(10ms) 대비 충분히 길고, 줄 끝 방향전환보다도 길게 잡는다. */
 #define SCAN_IDLE_TIMEOUT_MS   3000u
+
+/* 스캔 전 자동 홈 대기.
+ * 홈은 절대 엔코더 판독 1회라 구동이 없어 수 ms 면 끝난다. UART 왕복까지
+ * 쳐도 여유가 크므로 재시도 간격은 짧게, 포기 시각은 넉넉히 잡는다. */
+#define HOME_RETRY_MS           500u
+#define HOME_TIMEOUT_MS        3000u
 
 /* ---------------------------------------------------------------------------
  *  파일 디스크립터 헬퍼 (C: RAII 없음 → 명시 관리)
@@ -1039,13 +1050,66 @@ static void core_poll_link(struct core *c)
 /* ---------------------------------------------------------------------------
  *  상태 평가 / 전이
  * ------------------------------------------------------------------------- */
+/* 스캔 요청이 들어왔는데 아직 홈이 안 섰을 때 호출.
+ *
+ * STM 은 홈 전 SCAN_START 를 ERR_NOT_HOMED 로 거절한다(protocol.h §4).
+ * 예전에는 데몬이 CMD_HOME 을 아예 보내지 않아, 사용자가 turret_test home 을
+ * 따로 치지 않으면 스캔이 항상 거절됐다.
+ *
+ * 요청을 소비하지 않고 남겨둔 채 홈만 세운다. 홈이 서면 다음 tick 에서
+ * 그대로 SCANNING 으로 넘어간다.
+ *   반환 true  = 아직 대기 중 (이번 tick 은 전이하지 않는다)
+ *        false = 홈 완료 또는 포기 — 호출자가 판단 */
+static bool core_await_home(struct core *c)
+{
+    const uint64_t now = mono_ms();
+    bool waiting = true;
+
+    if (c->home_req_first_ms == 0u) {
+        c->home_req_first_ms = now;
+        c->home_req_last_ms  = 0u;         /* 아래에서 즉시 1회 송신 */
+    }
+
+    if ((c->home_req_last_ms == 0u) ||
+        ((now - c->home_req_last_ms) >= HOME_RETRY_MS)) {
+        if (ioctl(c->turret_fd, TURRET_HOME) < 0) {
+            core_log(c, "HOME", "TURRET_HOME ioctl 실패: %s", strerror(errno));
+        } else if (c->home_req_last_ms == 0u) {
+            core_log(c, "HOME", "스캔 전 홈 확립 요청 (CMD_HOME)");
+        } else {
+            /* 재시도는 조용히 — 로그가 500ms 마다 쌓이지 않게 */
+        }
+        c->home_req_last_ms = now;
+    }
+
+    if ((now - c->home_req_first_ms) > HOME_TIMEOUT_MS) {
+        core_log(c, "HOME",
+                 "홈 무응답 %ums — 스캔 요청 취소 (엔코더/링크 확인)",
+                 HOME_TIMEOUT_MS);
+        c->ctx.req.valid      = 0u;        /* 요청 폐기 */
+        c->home_req_first_ms  = 0u;
+        c->home_req_last_ms   = 0u;
+        waiting = false;
+    }
+    return waiting;
+}
+
 static void core_eval_state(struct core *c)
 {
     switch (c->ctx.state) {
     case ST_IDLE:
         if (c->ctx.req.valid != 0u) {                 /* MQTT scan/start 수신 */
-            c->ctx.req.valid = 0u;                    /* 요청 소비 */
-            core_transition(c, ST_SCANNING);
+            const bool need_home = (c->turret_fd >= 0)
+                                && (c->ctx.link.homed == 0u);
+
+            if (need_home) {
+                (void)core_await_home(c);             /* 요청은 그대로 보류 */
+            } else {
+                c->home_req_first_ms = 0u;            /* 대기 상태 정리 */
+                c->home_req_last_ms  = 0u;
+                c->ctx.req.valid     = 0u;            /* 요청 소비 */
+                core_transition(c, ST_SCANNING);
+            }
         }
         break;
 

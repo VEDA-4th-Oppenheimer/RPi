@@ -78,3 +78,45 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM BEFORE)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+# ---------------------------------------------------------------------------
+#  libssp 동적 의존 제거
+#
+#  증상: RPi 에서 실행하면
+#      error while loading shared libraries: libssp.so.0: cannot open ...
+#
+#  원인: 우리는 -fstack-protector-all 로 빌드하는데, 이 크로스 툴체인의 GCC
+#    spec 이 링크 시 `-lssp` 를 뒤에 붙인다. 그래서 __stack_chk_fail 이
+#    libssp 에서 해결되고 DT_NEEDED 에 libssp.so.0 이 박힌다.
+#    그런데 대상(Debian Bookworm, glibc 2.36)에는 libssp 가 없다 — glibc 가
+#    __stack_chk_fail@@GLIBC_2.17 을 자체 제공하기 때문에 애초에 불필요하다.
+#
+#  해결: SSP 가 쓰는 심볼 두 개를 각각 원래 자리에서 해결시키고,
+#    --as-needed 로 쓰이지 않게 된 libssp 를 DT_NEEDED 에서 뺀다.
+#      __stack_chk_fail  -> libc.so.6                (-lc 를 앞쪽에 한 번)
+#      __stack_chk_guard -> ld-linux-aarch64.so.1    (aarch64 는 동적 링커가 정의)
+#    이 툴체인은 -mstack-protector-guard=global 이 기본이라 guard 를 심볼로
+#    참조하는데, glibc 는 그걸 내보내지 않고 rtld 가 내보낸다. ld-linux 는
+#    어차피 항상 적재되므로 명시적으로 걸어도 부담이 없다.
+#    **스택 보호는 그대로 유지된다** — 구현 제공자만 바뀔 뿐이다.
+#
+#  ※ Docker(adts, arm64 네이티브) 빌드는 이 문제가 없다 — 대상과 같은 glibc
+#    툴체인이라 처음부터 libssp 대신 libc + ld-linux 로 해결한다.
+#    **배포용 바이너리는 Docker 빌드를 쓰는 것을 권장**하고, 이 크로스 경로는
+#    맥에서 빠르게 빌드·인덱싱하는 용도로 둔다.
+# ---------------------------------------------------------------------------
+#  ⚠️ 배치가 중요하다. CMAKE_EXE_LINKER_FLAGS 는 링크 라인에서 **오브젝트
+#    앞**에 놓인다. 거기에 -lc 를 걸면 그 시점엔 아직 미해결 심볼이 없어
+#    --as-needed 가 통째로 버리고, 결국 뒤에 오는 spec 의 -lssp 가 심볼을
+#    가져간다. 그래서 링크 라인 **맨 뒤**에 붙는 CMAKE_C_STANDARD_LIBRARIES
+#    를 쓴다.
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-Wl,--as-needed")
+
+if(CROSS_SYSROOT AND EXISTS "${CROSS_SYSROOT}/lib/ld-linux-aarch64.so.1")
+    set(CMAKE_C_STANDARD_LIBRARIES
+        "-lc ${CROSS_SYSROOT}/lib/ld-linux-aarch64.so.1"
+        CACHE STRING "libssp 회피: SSP 심볼을 libc + rtld 에서 해결" FORCE)
+else()
+    set(CMAKE_C_STANDARD_LIBRARIES "-lc"
+        CACHE STRING "libssp 회피(부분)" FORCE)
+endif()

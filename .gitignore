@@ -15,6 +15,7 @@ Module.symvers
 
 # ── 유저 앱 / 데몬 빌드 산출물 ──
 turret_test
+adts_daemon*
 build/
 build-arm64/
 build_host/
