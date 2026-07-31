@@ -20,41 +20,42 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v5
 
-      # [개선] 커널 헤더와 build-essential 설치를 전면 제거하고, 가벼운 cppcheck만 설치합니다.
+      # 커널 헤더/build-essential 없이 가벼운 cppcheck 만 설치.
       - name: Install Static Analysis Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y cppcheck
 
-      # 드라이버 전용 분석 옵션 실행 (헤더 없이도 suppress 설정 덕분에 정상 통과)
+      # 드라이버 전용 분석 (헤더 없이도 억제 설정으로 정상 통과)
       - name: Run cppcheck (driver + shared)
         run: bash tools/run_static_analysis.sh driver
 
-      # [개선] 커널 헤더가 필요한 modules 대신, 유저 공간 앱만 컴파일하여 GCC Warning/Error를 검증합니다.
+      # 커널 헤더가 필요한 모듈 대신, 유저 공간 앱만 컴파일하여 GCC Warning/Error 검증
       - name: Check GCC Warnings (Compile check)
         run: |
           cd driver
           make turret_test
 
-  # ── 데몬 정적분석 (Clang-Tidy + Core Guidelines) ──
+  # ── C 데몬 정적분석 (CMake -Werror 빌드 게이트 + cppcheck) ──
   daemon-analysis:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v5
 
-      # [개선] CMake와 build-essential은 GitHub Runner에 이미 설치되어 있으므로 clang-tidy만 설치합니다.
-      - name: Install Clang-Tidy
+      # cmake/gcc 는 러너에 기본 탑재. cppcheck 만 설치.
+      - name: Install cppcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy
+          sudo apt-get install -y cppcheck
 
-      - name: Configure CMake (Generate Compilation Database)
-        run: |
-          mkdir -p daemon/build
-          cd daemon/build
-          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+      # 1차 게이트: 실제 컴파일 (-Wall -Wextra -Werror). compile_commands.json 도 여기서 생성.
+      - name: Configure CMake
+        run: cmake -S daemon -B daemon/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      # 데몬 전용 분석 옵션 실행
-      - name: Run Clang-Tidy Analysis
+      - name: Build (-Wall -Wextra -Werror gate)
+        run: cmake --build daemon/build
+
+      # 2차 게이트: cppcheck (compile_commands.json 기반)
+      - name: Run cppcheck (daemon)
         run: bash tools/run_static_analysis.sh daemon

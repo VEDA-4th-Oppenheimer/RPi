@@ -29,12 +29,20 @@
   typedef uint32_t proto_u32;
 #endif
 
-/* 0. 버전 */
-#define PROTO_VERSION   4u
+/* 0. 버전
+ *   v5 (2026-07-29) : proto_scan_point 확장 — 라이다 원시 품질 필드 보존.
+ *     TOFSense-F2P 16바이트 프레임에 이미 들어오지만 버리고 있던 값들
+ *     (device_time / dis_status / signal_strength / range_precision)과
+ *     STM32 타임스탬프를 상행한다. JSON 인터페이스 계약 1.0 의 필수·권고
+ *     필드를 채우기 위함. 페이로드 6B -> 18B, 프레임 11B -> 23B
+ *     (115200 기준 100Hz 에서 UART 사용률 9.5% -> 20%). */
+#define PROTO_VERSION   5u
 
 /* 1. 프레임 구조 상수 */
 #define PROTO_SOF            0xAAu
-#define PROTO_MAX_PAYLOAD    16u
+/* v5 에서 proto_scan_point 가 18B 가 되어 16 -> 24 로 확장(여유 포함).
+ * ⚠️ 이 값을 줄이면 스캔 점 프레임이 CWE-120 경계검사에서 조용히 버려진다. */
+#define PROTO_MAX_PAYLOAD    24u
 #define PROTO_HEADER_LEN     3u
 #define PROTO_CRC_LEN        2u
 #define PROTO_MAX_FRAME      (PROTO_HEADER_LEN + PROTO_MAX_PAYLOAD + PROTO_CRC_LEN)
@@ -109,11 +117,24 @@ struct proto_scan_start {
     proto_u16 step_ddeg;         /* 격자 간격 (0.1도, 10=1.0도)  */
 } PROTO_PACKED;
 
-/* CMD_SCAN_DATA payload : 스캔 점 하나 (6B) */
+/* CMD_SCAN_DATA payload : 스캔 점 하나 (18B, v5)
+ *
+ *  ⚠️ signal_strength / range_precision / dis_status 는 **원본 그대로** 전달한다.
+ *    정규화·판정은 상위(데몬/캘리브)에서. 특히 signal_strength 는 calibrated
+ *    reflectivity 가 아니므로 재질 판별에 단독 사용 금지(문서 01 §6.2).
+ *
+ *  ⚠️ device_time_ms 는 라이다 자체 시계, stm_ts_ms 는 STM32 시계다.
+ *    서로 다른 clock domain 이므로 섞어 쓰지 말 것. 각도-거리 동기는 이미
+ *    STM32 가 ISR 에서 원자적으로 래치하므로 보간이 필요 없다. */
 struct proto_scan_point {
-    proto_s16 pan_ddeg;   /* 방위 (0.1도, 스텝카운트 래치)     */
-    proto_s16 tilt_ddeg;     /* 고각 (0.1도, 엔코더 래치, 부호)   */
-    proto_u16 d_mm;         /* 거리 (mm)                         */
+    proto_s16 pan_ddeg;          /* 방위 (0.1도, 스텝카운트/엔코더 래치)      */
+    proto_s16 tilt_ddeg;         /* 고각 (0.1도, 부호)                        */
+    proto_u16 d_mm;              /* 거리 (mm)                                 */
+    proto_u16 signal_strength;   /* F2P 원본 신호세기 (정규화 안 함)          */
+    proto_u32 device_time_ms;    /* F2P system time 원본 (라이다 시계)        */
+    proto_u32 stm_ts_ms;         /* 래치 시각 (STM32 HAL tick, ms)            */
+    proto_u8  dis_status;        /* F2P 원본 거리상태 (유효성 판정 원천)      */
+    proto_u8  range_precision;   /* F2P 원본 거리정밀도                       */
 } PROTO_PACKED;
 
 /* CMD_SCAN_DONE payload : 스캔 완료 요약 (4B) */
@@ -165,8 +186,8 @@ PROTO_PACKED_END
   struct turret_link_state {
       proto_u8  link_alive;      /* 1=heartbeat 정상, 0=link_dead     */
       proto_u8  flags;           /* STM proto_status.flags 최신값      */
-      proto_s16 cur_pan_ddeg;  /* 최근 보고된 현재 방위각            */
-      proto_s16 cur_tilt_ddeg;    /* 최근 보고된 현재 고각 (부호)       */
+      proto_s16 cur_pan_ddeg;    /* 최근 보고된 현재 방위각            */
+      proto_s16 cur_tilt_ddeg;   /* 최근 보고된 현재 고각 (부호)       */
       proto_u8  last_err;        /* 최근 CMD_ERROR code               */
       proto_u32 pong_seq;        /* PONG 누적 카운터 (heartbeat 감지) */
   };
@@ -198,5 +219,20 @@ static inline proto_u16 proto_crc16(const proto_u8 *data, proto_u16 len)
     }
     return crc;
 }
+
+/* 9. 컴파일 타임 계약 검증
+ *
+ *  구조체 크기가 3자(STM32 펌웨어 / 커널 드라이버 / 데몬) 중 한 곳에서만
+ *  달라지면 프레임이 조용히 어긋난다(패딩·타입 폭 차이). 여기서 막는다.
+ *  실패하면 "배열 크기가 음수" 류의 컴파일 에러가 난다. */
+/* (매크로 대신 직접 typedef — MISRA 20.10 '##' 회피) */
+typedef char proto_assert_scan_point_18B
+    [(sizeof(struct proto_scan_point) == 18u) ? 1 : -1];
+typedef char proto_assert_scan_start_10B
+    [(sizeof(struct proto_scan_start) == 10u) ? 1 : -1];
+typedef char proto_assert_scan_done_4B
+    [(sizeof(struct proto_scan_done) == 4u) ? 1 : -1];
+typedef char proto_assert_point_fits_payload
+    [(sizeof(struct proto_scan_point) <= PROTO_MAX_PAYLOAD) ? 1 : -1];
 
 #endif /* PROTOCOL_H */
