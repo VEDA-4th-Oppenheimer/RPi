@@ -889,6 +889,13 @@ static void core_transition(struct core *c, daemon_state_t want)
         (void)snprintf(c->ctx.result.path, sizeof(c->ctx.result.path), "%s", c->pc_path);
         c->ctx.result.point_count = c->pc_written;
         c->ctx.result.valid       = 1u;
+        /* MQTT_INTERFACE_CONTRACT.md §3.4 state/scan 페이로드용 부가 정보 */
+        (void)snprintf(c->ctx.result.session_id, sizeof(c->ctx.result.session_id), "%s", c->session_id);
+        (void)snprintf(c->ctx.result.scan_id, sizeof(c->ctx.result.scan_id), "%s", c->scan_id);
+        (void)snprintf(c->ctx.result.json_path, sizeof(c->ctx.result.json_path), "%s", c->js_path);
+        c->ctx.result.rows        = c->grid_rows;
+        c->ctx.result.columns     = c->grid_cols;
+        c->ctx.result.duration_s  = (double)(c->scan_end_ns - c->scan_start_ns) / 1e9;
         core_log(c, "EXPORT", "%s (%u점) — 카메라 단 전달 대기",
                  c->ctx.result.path, c->ctx.result.point_count);
     } else if (want == ST_DISARM) {
