@@ -1066,30 +1066,39 @@ static bool core_await_home(struct core *c)
     bool waiting = true;
 
     if (c->home_req_first_ms == 0u) {
+        /* 이번 요청의 첫 진입 — **캐시된 homed 를 보지 않고 무조건** 보낸다.
+         *
+         * 캐시를 믿으면 안 되는 이유(실기에서 발생):
+         *   드라이버의 STF_HOMED 는 CMD_HOMED 를 받을 때 서기만 하고, STM 은
+         *   CMD_STATUS 를 주기 송신하지 않아 갱신될 일도 없다. 그래서 한 번
+         *   홈을 잡은 뒤 STM 을 리셋/재플래시하면 STM 의 s.homed 는 false 인데
+         *   드라이버 캐시만 참으로 남는다. 그 상태로 홈을 건너뛰면 SCAN_START
+         *   가 매번 ERR_NOT_HOMED 로 거절된다.
+         *
+         * 홈은 절대 엔코더 판독 1회라 구동이 없어 비용이 사실상 0 이다.
+         * 스캔마다 다시 잡는 편이 캐시를 신뢰하는 것보다 안전하다.
+         * (드라이버도 이 ioctl 에서 STF_HOMED 를 내리므로, 이후 homed==1 은
+         *  반드시 이번 HOME 에 대한 응답이다) */
         c->home_req_first_ms = now;
-        c->home_req_last_ms  = 0u;         /* 아래에서 즉시 1회 송신 */
-    }
-
-    if ((c->home_req_last_ms == 0u) ||
-        ((now - c->home_req_last_ms) >= HOME_RETRY_MS)) {
+        c->home_req_last_ms  = now;
         if (ioctl(c->turret_fd, TURRET_HOME) < 0) {
             core_log(c, "HOME", "TURRET_HOME ioctl 실패: %s", strerror(errno));
-        } else if (c->home_req_last_ms == 0u) {
-            core_log(c, "HOME", "스캔 전 홈 확립 요청 (CMD_HOME)");
         } else {
-            /* 재시도는 조용히 — 로그가 500ms 마다 쌓이지 않게 */
+            core_log(c, "HOME", "스캔 전 홈 확립 요청 (CMD_HOME)");
         }
-        c->home_req_last_ms = now;
-    }
-
-    if ((now - c->home_req_first_ms) > HOME_TIMEOUT_MS) {
+    } else if (c->ctx.link.homed != 0u) {
+        waiting = false;                   /* 이번 HOME 에 대한 응답 도착 */
+    } else if ((now - c->home_req_first_ms) > HOME_TIMEOUT_MS) {
         core_log(c, "HOME",
-                 "홈 무응답 %ums — 스캔 요청 취소 (엔코더/링크 확인)",
+                 "홈 무응답 %ums — 스캔 요청 취소 (링크/펌웨어 확인)",
                  HOME_TIMEOUT_MS);
-        c->ctx.req.valid      = 0u;        /* 요청 폐기 */
-        c->home_req_first_ms  = 0u;
-        c->home_req_last_ms   = 0u;
+        c->ctx.req.valid = 0u;             /* 요청 폐기 */
         waiting = false;
+    } else if ((now - c->home_req_last_ms) >= HOME_RETRY_MS) {
+        c->home_req_last_ms = now;
+        (void)ioctl(c->turret_fd, TURRET_HOME);   /* 재시도는 조용히 */
+    } else {
+        /* 계속 대기 */
     }
     return waiting;
 }
@@ -1099,16 +1108,20 @@ static void core_eval_state(struct core *c)
     switch (c->ctx.state) {
     case ST_IDLE:
         if (c->ctx.req.valid != 0u) {                 /* MQTT scan/start 수신 */
-            const bool need_home = (c->turret_fd >= 0)
-                                && (c->ctx.link.homed == 0u);
-
-            if (need_home) {
-                (void)core_await_home(c);             /* 요청은 그대로 보류 */
+            /* turret 이 있으면 스캔 전에 항상 홈을 다시 잡는다(위 주석 참조).
+             * 대기 중에는 요청을 소비하지 않고 다음 tick 에 다시 본다 —
+             * 소비해버리면 홈이 선 뒤에 스캔이 사라진다. */
+            if ((c->turret_fd >= 0) && core_await_home(c)) {
+                /* 홈 대기 중 */
             } else {
+                const bool cancelled = (c->ctx.req.valid == 0u);
+
                 c->home_req_first_ms = 0u;            /* 대기 상태 정리 */
                 c->home_req_last_ms  = 0u;
-                c->ctx.req.valid     = 0u;            /* 요청 소비 */
-                core_transition(c, ST_SCANNING);
+                if (!cancelled) {
+                    c->ctx.req.valid = 0u;            /* 요청 소비 */
+                    core_transition(c, ST_SCANNING);
+                }
             }
         }
         break;

@@ -344,6 +344,17 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case TURRET_HOME:
 		mutex_lock(&dev->lock);
+		/* 요청 시점에 STF_HOMED 를 내린다.
+		 *
+		 * 이게 없으면 플래그가 "예전에 한 번이라도 홈했음" 이라는 뜻이 되어
+		 * 영영 참으로 남는다. STM 은 CMD_STATUS 를 주기적으로 보내지 않아
+		 * 갱신될 일도 없으므로, STM 을 리셋/재플래시하면 STM 의 홈 상태는
+		 * 사라졌는데 드라이버 캐시만 참으로 남는다. 그 상태로 유저가 홈을
+		 * 건너뛰면 SCAN_START 가 매번 ERR_NOT_HOMED 로 거절된다(실기 발생).
+		 *
+		 * 내려두면 플래그가 "직전 HOME 이후 완료됨" 을 뜻하게 되어,
+		 * 유저가 이 플래그를 기다리는 것이 실제로 의미를 갖는다. */
+		dev->st.flags &= ~STF_HOMED;
 		ret = turret_send_frame(dev, CMD_HOME, NULL, 0);
 		mutex_unlock(&dev->lock);
 		return ret;
