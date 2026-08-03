@@ -222,6 +222,13 @@ struct core {
  * 라이다 100Hz(10ms) 대비 충분히 길고, 줄 끝 방향전환보다도 길게 잡는다. */
 #define SCAN_IDLE_TIMEOUT_MS   3000u
 
+/* 첫 점 대기 한도. 스캔 시작 후 이 시간 안에 점이 하나도 안 오면
+ * 라이다/링크 이상으로 보고 마감한다(안 그러면 ST_SCANNING 에 영구 체류).
+ * 무입력(3000ms)보다 길게 잡는 이유: 시작 직후 STM 이 HOMING → MOVE_START
+ * 로 시작 자세까지 이동하는 동안은 점이 없는 게 정상이다.
+ * 최악(팬 180° @200Hz ≈ 8s + 틸트 ≈ 1s)을 덮도록 여유를 둔다. */
+#define SCAN_FIRST_POINT_TIMEOUT_MS 15000u
+
 /* 스캔 전 자동 홈 대기.
  * 홈은 절대 엔코더 판독 1회라 구동이 없어 수 ms 면 끝난다. UART 왕복까지
  * 쳐도 여유가 크므로 재시도 간격은 짧게, 포기 시각은 넉넉히 잡는다. */
@@ -1139,16 +1146,31 @@ static void core_eval_state(struct core *c)
         if (c->turret_fd >= 0) {
             const bool done_sig =
                 (c->ctx.link.scanning == 0u) && (c->ctx.progress.points > 0u);
-            const bool idle_timeout =
-                (c->ctx.progress.points > 0u) &&
-                ((mono_ms() - c->last_point_ms) > SCAN_IDLE_TIMEOUT_MS);
+
+            /* 점이 아직 0 개면 "첫 점 대기"(길게), 하나라도 왔으면
+             * "무입력"(짧게). points 를 탈출 자격이 아니라 타임아웃 길이
+             * 선택에만 쓰므로 어느 경우에도 반드시 빠져나온다. */
+            const bool     started  = (c->ctx.progress.points > 0u);
+            const uint32_t limit_ms = started ? SCAN_IDLE_TIMEOUT_MS
+                                              : SCAN_FIRST_POINT_TIMEOUT_MS;
+            const bool timed_out =
+                (mono_ms() - c->last_point_ms) > (uint64_t)limit_ms;
 
             if (done_sig) {
                 core_transition(c, ST_EXPORT);
-            } else if (idle_timeout) {
-                core_log(c, "SCAN", "무입력 %ums — SCAN_DONE 없이 마감",
-                         SCAN_IDLE_TIMEOUT_MS);
+            } else if (timed_out) {
+                if (started) {
+                    core_log(c, "SCAN", "무입력 %ums — SCAN_DONE 없이 마감",
+                             SCAN_IDLE_TIMEOUT_MS);
+                } else {
+                    core_log(c, "SCAN",
+                             "첫 점이 %ums 동안 없음 — 라이다/링크 확인 요망."
+                             " 0 점으로 마감",
+                             SCAN_FIRST_POINT_TIMEOUT_MS);
+                }
                 core_transition(c, ST_EXPORT);
+            } else {
+                /* 계속 대기 */
             }
         }
         break;
