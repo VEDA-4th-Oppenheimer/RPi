@@ -99,21 +99,12 @@ struct scan_progress {
     uint8_t  percent;           /* 0..100 (expected==0 이면 0)                */
 };
 
-/* 스캔 결과 요약. 코어가 EXPORT 진입 시 씀, mqtt_module 이 state/scan 발행.
- * session_id/scan_id/json_path/rows/columns/duration_s 는 MQTT_INTERFACE_CONTRACT.md
- * §3.4 state/scan 페이로드를 채우기 위해 추가됨(기존 3필드는 그대로, 뒤에 덧붙임). */
+/* 스캔 결과 요약. 코어가 EXPORT 진입 시 씀, mqtt_module 이 scan/done 발행 */
 struct scan_result {
     char     path[256];         /* 생성된 포인트클라우드 파일 경로 (.pcd)     */
     uint32_t point_count;       /* 파일에 기록된 점 수                        */
     uint32_t stm_reported;      /* STM 이 CMD_SCAN_DONE 으로 보고한 점 수     */
     uint8_t  valid;             /* 1=파일 준비 완료                           */
-
-    char     session_id[32];    /* 예: calib-20260730-214014                 */
-    char     scan_id[32];       /* 예: sweep-000001                          */
-    char     json_path[256];    /* 원시 측정 JSON 파일 경로                  */
-    uint32_t rows;               /* organized 격자 행 수 (tilt)               */
-    uint32_t columns;            /* organized 격자 열 수 (pan)                */
-    double   duration_s;         /* 스캔 시작~끝 소요 시간(초)                */
 };
 
 /* 거치 수평 상태. imu_module 이 중력벡터에서 산출해 씀, 코어가 게이트 판정.
