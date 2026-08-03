@@ -24,6 +24,16 @@
  * ==========================================================================*/
 #include "daemon_module.h"
 
+/* ---------------------------------------------------------------------------
+ *  ADTS_NO_MQTT — libmosquitto/libcjson 이 없는 환경용 컴파일아웃
+ *
+ *  맥 크로스 툴체인 sysroot 에는 aarch64 용 패키지가 없다. 그때도 데몬이
+ *  빌드돼야 CLion 인덱싱과 나머지 코드 검증이 가능하므로, MQTT 만 빼고
+ *  같은 인터페이스의 빈 모듈로 대체한다(파일 끝의 #else 블록).
+ *  배포 바이너리는 Docker(대상과 같은 glibc)에서 굽는다.
+ * ------------------------------------------------------------------------- */
+#ifndef ADTS_NO_MQTT
+
 #include <mosquitto.h>
 #include <cjson/cJSON.h>
 
@@ -547,6 +557,27 @@ static void mqtt_deinit(struct shared_ctx *ctx)
         core_log(ctx->core, "MQTT", "정리 완료");
     }
 }
+
+#else  /* ADTS_NO_MQTT — 라이브러리 없이 빌드 */
+
+#include <stdio.h>
+
+static int mqtt_init(struct shared_ctx *ctx)
+{
+    core_log(ctx->core, "MQTT",
+             "비활성 빌드 (libmosquitto/libcjson 없음) — CLI --scan 만 가능");
+    return 0;
+}
+static int  mqtt_get_fd(void) { return -1; }
+static void mqtt_on_event(struct shared_ctx *ctx) { (void)ctx; }
+static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
+{ (void)ctx; (void)state; }
+static void mqtt_on_state(struct shared_ctx *ctx,
+                          daemon_state_t old_st, daemon_state_t new_st)
+{ (void)ctx; (void)old_st; (void)new_st; }
+static void mqtt_deinit(struct shared_ctx *ctx) { (void)ctx; }
+
+#endif /* ADTS_NO_MQTT */
 
 static const struct daemon_module k_mqtt = {
     "mqtt",

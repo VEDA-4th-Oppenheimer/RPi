@@ -52,7 +52,22 @@ add_executable(adts_daemon
 #  libmosquitto : MQTT 클라이언트 (mqtt_module, epoll 통합)
 #  libcjson     : 명령/상태 페이로드 파싱·생성
 #  둘 다 Debian/Ubuntu 패키지: apt install libmosquitto-dev libcjson-dev
-find_library(MOSQUITTO_LIB mosquitto REQUIRED)
-find_library(CJSON_LIB     cjson     REQUIRED)
+#
+#  ⚠️ 두 라이브러리는 **선택**이다. 없으면 MQTT 를 컴파일아웃하고 계속 빌드한다.
+#    맥 크로스 툴체인 sysroot 에는 aarch64 용 패키지가 없어서, REQUIRED 로 두면
+#    CLion 이 configure 단계에서 실패해 인덱싱조차 안 된다. 실제 배포 바이너리는
+#    Docker(대상과 같은 glibc) 에서 굽고, 크로스 경로는 편집·인덱싱용이다.
+find_library(MOSQUITTO_LIB mosquitto)
+find_library(CJSON_LIB     cjson)
 
-target_link_libraries(adts_daemon m ${MOSQUITTO_LIB} ${CJSON_LIB})
+if(MOSQUITTO_LIB AND CJSON_LIB)
+    target_link_libraries(adts_daemon m ${MOSQUITTO_LIB} ${CJSON_LIB})
+    message(STATUS "MQTT: 활성 (${MOSQUITTO_LIB} / ${CJSON_LIB})")
+else()
+    target_link_libraries(adts_daemon m)
+    target_compile_definitions(adts_daemon PRIVATE ADTS_NO_MQTT=1)
+    message(WARNING
+        "libmosquitto/libcjson 를 찾지 못해 MQTT 를 비활성으로 빌드합니다.\n"
+        "  이 바이너리로는 Qt 관제 연동이 되지 않습니다(CLI --scan 은 정상).\n"
+        "  배포용은 Docker 에서 빌드하십시오:  apt install libmosquitto-dev libcjson-dev")
+endif()
