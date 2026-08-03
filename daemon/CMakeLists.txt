@@ -48,4 +48,11 @@ add_executable(adts_daemon
 )
 
 # 좌표 변환에 libm (cos/sin) 필요
-target_link_libraries(adts_daemon m)
+# ── 외부 라이브러리 ────────────────────────────────────────────────────────
+#  libmosquitto : MQTT 클라이언트 (mqtt_module, epoll 통합)
+#  libcjson     : 명령/상태 페이로드 파싱·생성
+#  둘 다 Debian/Ubuntu 패키지: apt install libmosquitto-dev libcjson-dev
+find_library(MOSQUITTO_LIB mosquitto REQUIRED)
+find_library(CJSON_LIB     cjson     REQUIRED)
+
+target_link_libraries(adts_daemon m ${MOSQUITTO_LIB} ${CJSON_LIB})
