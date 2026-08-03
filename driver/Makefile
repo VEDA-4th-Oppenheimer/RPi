@@ -1,22 +1,14 @@
-# turret_driver/Makefile
+# driver/Makefile
 #
 # RPi에서 빌드:
-#   make            커널 모듈(.ko) + 유저 테스트 앱(turret_test)
+#   make            커널 모듈(.ko) + 유저 테스트 앱
 #   make dtbo       Device Tree 오버레이(turret-overlay.dtbo)
 #   make clean      정리
 #
-# ── 빌드 대상 선택 ──
-# (A) 로컬 호스트용:  make
-# (B) 라즈베리파이(arm64) 크로스컴파일:
-#       make rpi                       # 아래 RPI_* 기본값 사용
-#     또는 직접 지정:
-#       make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=/usr/src/linux
-#
-# ★ .ko 와 turret_test 는 반드시 같은 타깃(arch/커널)으로 빌드해야
-#    RPi 에서 insmod/실행된다. 'make rpi' 가 둘 다 크로스로 맞춰준다.
-#
 # protocol.h 마스터는 rpi repo 의 ../shared/ 에 있다 (single source).
-# 같은 폴더 / 상위 / ../shared 어느 쪽이든 자동 탐색한다.
+
+# ★ Makefile이 위치한 현재 디렉토리 경로를 절대경로로 고정 (Kbuild clean/all 오류 방지)
+PWD := $(CURDIR)
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
@@ -25,7 +17,7 @@ RPI_KDIR  ?= /usr/src/linux
 RPI_ARCH  ?= arm64
 RPI_CROSS ?= aarch64-linux-gnu-
 
-# 유저 앱 컴파일러: CROSS_COMPILE 지정 시 그 크로스 gcc, 아니면 호스트
+# 유저 앱 컴파일러: CROSS_COMPILE 지정 시 그 크로스 gcc, 아니면 호스트 gcc
 APP_CC := $(CROSS_COMPILE)gcc
 
 # =====================================================================
@@ -46,7 +38,7 @@ APP_CFLAGS := -Wall -Wextra -Werror \
               -z relro -z now
 
 # ── 커널 모듈 (kbuild) ──
-obj-m     += turret_driver.o
+obj-m     += turret_driver.o imu_driver.o
 ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
 
 # ── 유저 앱: protocol.h 위치 자동 탐색 (../shared 우선) ──
@@ -55,9 +47,9 @@ PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $
 # ── 타겟 ──
 .PHONY: all rpi modules clean dtbo
 
-all: modules turret_test
+all: modules turret_test imu_test
 
-# 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + turret_test 둘 다 arm64
+# 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + 테스트 앱 둘 다 arm64
 rpi:
 	$(MAKE) ARCH=$(RPI_ARCH) CROSS_COMPILE=$(RPI_CROSS) KDIR=$(RPI_KDIR) all
 
@@ -67,6 +59,9 @@ modules:
 turret_test: turret_test.c $(PROTO_H)
 	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
 
+imu_test: imu_test.c
+	$(APP_CC) $(APP_CFLAGS) -I. -I.. -I../shared -o $@ $< -lm
+
 dtbo: turret-overlay.dtbo
 
 turret-overlay.dtbo: turret-overlay.dts
@@ -74,4 +69,4 @@ turret-overlay.dtbo: turret-overlay.dts
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f turret_test turret-overlay.dtbo
+	rm -f turret_test imu_test turret-overlay.dtbo
