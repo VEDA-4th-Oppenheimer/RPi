@@ -21,6 +21,7 @@ cmake-build-*/
 compile_commands.json
 *.a
 *.so
+scans/
 
 # ── IDE / OS ──
 .idea/

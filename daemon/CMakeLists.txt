@@ -27,6 +27,10 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie -z relro -z now")
 # cppcheck 분석을 위한 compile_commands.json 생성 (핵심)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# mqtt_module.c 가 libmosquitto 를 쓴다 (apt: libmosquitto-dev)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
+
 # 공용 계약 헤더 + 데몬 헤더 경로
 include_directories(
     ${CMAKE_SOURCE_DIR}/../shared
@@ -39,7 +43,7 @@ include_directories(
 # 실행 파일 및 소스
 #   core/     = 이현우 (epoll 루프 + FSM + shared_ctx
 #                       + (pan,tilt,d)->(x,y,z) 변환 + 포인트클라우드 .pcd)
-#   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우  — 현재 STUB
+#   modules/  = mqtt:이현우+이광진(구현 완료) / imu:송영빈(STUB) / led:이현우(STUB)
 add_executable(adts_daemon
     core/main.c
     modules/mqtt/mqtt_module.c
@@ -47,5 +51,5 @@ add_executable(adts_daemon
     modules/led/led_module.c
 )
 
-# 좌표 변환에 libm (cos/sin) 필요
-target_link_libraries(adts_daemon m)
+# 좌표 변환에 libm (cos/sin), mqtt_module.c 에 libmosquitto 필요
+target_link_libraries(adts_daemon m PkgConfig::MOSQUITTO)
