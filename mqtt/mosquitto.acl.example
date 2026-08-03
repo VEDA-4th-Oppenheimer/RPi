@@ -1,0 +1,22 @@
+# ============================================================================
+#  adts.acl — 인증서 CN 기반 토픽 권한
+#  배치: sudo cp mosquitto.acl.example /etc/mosquitto/conf.d/adts.acl
+#  ※ use_identity_as_username true 라서 user = 인증서 CN
+# ============================================================================
+
+# 데몬: 명령을 받고 상태를 낸다
+user adts-daemon
+topic read  adts/cmd/#
+topic write adts/state/#
+topic write adts/event/#
+
+# Qt 관제: 명령을 내고 상태를 본다
+user qt-console
+topic write adts/cmd/#
+topic read  adts/state/#
+topic read  adts/event/#
+
+# 카메라: 스캔 결과를 읽고 캘리브 결과를 낸다. cmd 는 쓸 수 없다.
+user camera
+topic read  adts/state/scan
+topic write adts/calib/#
