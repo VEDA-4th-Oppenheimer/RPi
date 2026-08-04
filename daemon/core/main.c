@@ -137,7 +137,31 @@ struct scan_cell {
     uint8_t  dis_status;
     uint8_t  range_precision;
     bool     filled;
+
+    /* --- 셀 내 다중 샘플 병합 -------------------------------------------
+     * 틸트 45도/s + 라이다 100Hz = 0.45도/샘플 이므로 0.9도 격자에는
+     * 샘플이 2개씩 떨어진다. 위 필드들(각도·품질·시각)은 **셀 중심에
+     * 가장 가까운 샘플**의 것이고, 거리만 따로 누적해 둔다. */
+    uint32_t d_sum_mm;         /* 도착한 샘플 거리의 합                  */
+    uint16_t d_min_mm;
+    uint16_t d_max_mm;
+    uint16_t best_off_ddeg;    /* 대표 샘플이 셀 중심에서 벗어난 정도    */
+    uint8_t  n_samples;        /* 이 셀에 도착한 샘플 수 (255 에서 포화) */
 };
+
+/* 셀 안의 샘플들을 평균해도 되는지 판정하는 산포 허용치.
+ *
+ * 평평한 면에서는 두 샘플이 잡음(σ<1cm)만큼만 다르므로 평균이 이득이다
+ * (2개 평균 → σ/√2). 그러나 셀이 **깊이 불연속**을 물면 두 샘플이 앞뒤
+ * 서로 다른 표면을 재고, 그걸 평균하면 **허공에 없는 점이 생긴다.**
+ * 우리 미션이 구조 에지 기반 캘리브라 이 가짜 점이 정확도보다 훨씬 해롭다.
+ *
+ * 상대 허용치를 같이 두는 이유: 스치듯 비스듬한 면(천장에서 본 바닥 등)은
+ * 한 셀 안에서도 거리차가 원래 크다. 절대치만 쓰면 정작 평균이 필요한
+ * 자리에서 전부 거부된다. 0.9도 × 10m = 16cm 폭이고 입사각 80도면 정상
+ * 깊이차가 45cm 까지 나온다 — 반면 진짜 에지는 보통 m 단위로 뛴다. */
+#define CELL_AVG_ABS_TOL_MM    30u    /* 절대 하한                        */
+#define CELL_AVG_REL_TOL_PCT   15u    /* 가까운 쪽 거리 대비 허용 비율(%) */
 
 /* ---------------------------------------------------------------------------
  *  코어 구조체
@@ -188,7 +212,8 @@ struct core {
     uint32_t grid_rows;
     uint32_t grid_cols;
     uint32_t pc_written;       /* 격자에 채운 유효 점 수 */
-    uint32_t drop_dup;         /* 같은 셀에 중복 도착 (버려짐) */
+    uint32_t merged;           /* 같은 셀에 추가 도착해 병합된 샘플 수 */
+    uint32_t avg_refused;      /* 산포가 커 평균을 거부한 셀 수 (에지 추정) */
     uint32_t drop_range;       /* 격자 범위 밖 각도 */
     /* dis_status 분포 — Datasheet(0=invalid,1=valid) 와 User Manual 예제가
      * 정반대라 실측으로 판별해야 한다. 인덱스 = status 값(0~3), 그 외는 [3]. */
@@ -487,7 +512,8 @@ static bool pc_open(struct core *c)
     }
 
     c->pc_written    = 0u;
-    c->drop_dup      = 0u;
+    c->merged        = 0u;
+    c->avg_refused   = 0u;
     c->drop_range    = 0u;
     memset(c->status_hist, 0, sizeof(c->status_hist));
     c->scan_start_ns = mono_ns();
@@ -506,6 +532,66 @@ static bool pc_open(struct core *c)
  *
  * 기구각도 셀에 함께 남긴다. 산출물이 이상할 때 "변환이 틀렸나 / 모터가
  * 엉뚱한 데 있었나" 를 산출물만 보고 가를 수 있어야 하기 때문. */
+/* 이 샘플이 셀 중심에서 얼마나 벗어났나 (방위+고각 이탈량의 합, 0.1도).
+ * 같은 셀에 여러 샘플이 오면 이 값이 작은 쪽을 대표로 삼는다 — 격자 배정
+ * 오차를 ±step/2 에서 실질적으로 절반까지 줄인다. */
+static uint16_t cell_center_offset_ddeg(const struct core *c,
+                                        uint32_t row, uint32_t col,
+                                        int16_t c_pan, int16_t c_tilt)
+{
+    struct grid_geom g;
+    grid_geometry(&c->ctx.req, &g);
+
+    int32_t dt = (int32_t)c_tilt - (g.tilt_top_ddeg - ((int32_t)row * g.step));
+    if (dt < 0) {
+        dt = -dt;
+    }
+
+    int32_t dp = (int32_t)c_pan
+               - ((g.pan_origin_ddeg + ((int32_t)col * g.step)) % 3600);
+    dp %= 3600;
+    if (dp > 1800) {
+        dp -= 3600;
+    } else if (dp < -1800) {
+        dp += 3600;
+    } else {
+        /* 이미 반바퀴 안 */
+    }
+    if (dp < 0) {
+        dp = -dp;
+    }
+
+    return (uint16_t)(dt + dp);
+}
+
+/* 셀 안의 샘플들을 평균해도 되나. 판정 근거는 struct scan_cell 위 주석. */
+static bool cell_avg_ok(const struct scan_cell *cell)
+{
+    bool ok = false;
+
+    if (cell->n_samples >= 2u) {
+        const uint32_t spread = (uint32_t)cell->d_max_mm - (uint32_t)cell->d_min_mm;
+        uint32_t tol = ((uint32_t)cell->d_min_mm * CELL_AVG_REL_TOL_PCT) / 100u;
+        if (tol < CELL_AVG_ABS_TOL_MM) {
+            tol = CELL_AVG_ABS_TOL_MM;
+        }
+        ok = (spread <= tol);
+    }
+    return ok;
+}
+
+/* 산출물에 쓸 최종 거리. 평균이 안전하면 평균, 아니면 대표 샘플 그대로. */
+static uint16_t cell_distance_mm(const struct scan_cell *cell)
+{
+    uint16_t d = cell->d_mm;
+
+    if (cell_avg_ok(cell)) {
+        d = (uint16_t)((cell->d_sum_mm + ((uint32_t)cell->n_samples / 2u))
+                       / (uint32_t)cell->n_samples);
+    }
+    return d;
+}
+
 static void pc_write_point(struct core *c, const struct proto_scan_point *p)
 {
     uint32_t row = 0u;
@@ -525,16 +611,44 @@ static void pc_write_point(struct core *c, const struct proto_scan_point *p)
     }
 
     struct scan_cell *cell = &c->grid[((size_t)row * c->grid_cols) + col];
-    if (cell->filled) {
-        /* 같은 셀에 두 번 도착 — 먼저 온 값을 유지한다.
-         * (스윕 속도가 격자보다 조밀하면 정상적으로 발생.
-         *  nadir 부근은 방위가 축퇴해 구조적으로 몰린다) */
-        c->drop_dup++;
-        return;
+    const uint16_t   off   = cell_center_offset_ddeg(c, row, col, c_pan, c_tilt);
+
+    c->status_hist[(p->dis_status < 3u) ? p->dis_status : 3u]++;
+    c->scan_end_ns = mono_ns();
+
+    if (!cell->filled) {
+        cell->seq           = c->pc_written;
+        cell->d_sum_mm      = (uint32_t)p->d_mm;
+        cell->d_min_mm      = p->d_mm;
+        cell->d_max_mm      = p->d_mm;
+        cell->n_samples     = 1u;
+        cell->best_off_ddeg = off;
+        cell->filled        = true;
+        c->pc_written++;
+    } else {
+        /* 같은 셀에 추가 도착. 예전에는 버렸지만(drop_dup) 그러면 스윕이
+         * 격자보다 조밀할 때 절반을 그냥 내다 버리는 셈이었다. 거리는
+         * 누적해 평균 후보로 남기고, 나머지 필드는 셀 중심에 더 가까운
+         * 샘플이 왔을 때만 교체한다. */
+        c->merged++;
+        if (cell->n_samples < 255u) {
+            cell->n_samples++;
+        }
+        cell->d_sum_mm += (uint32_t)p->d_mm;
+        if (p->d_mm < cell->d_min_mm) {
+            cell->d_min_mm = p->d_mm;
+        }
+        if (p->d_mm > cell->d_max_mm) {
+            cell->d_max_mm = p->d_mm;
+        }
+        if (off >= cell->best_off_ddeg) {
+            return;                      /* 대표를 바꿀 만큼 가깝지 않다 */
+        }
+        cell->best_off_ddeg = off;
     }
 
-    cell->seq             = c->pc_written;
-    cell->rx_ns           = mono_ns();
+    /* 첫 샘플이거나, 셀 중심에 더 가까운 샘플로 대표를 교체하는 경우 */
+    cell->rx_ns           = c->scan_end_ns;
     cell->pan_ddeg        = c_pan;
     cell->tilt_ddeg       = c_tilt;
     cell->mech_pan_ddeg   = p->pan_ddeg;
@@ -545,11 +659,6 @@ static void pc_write_point(struct core *c, const struct proto_scan_point *p)
     cell->stm_ts_ms       = p->stm_ts_ms;
     cell->dis_status      = p->dis_status;
     cell->range_precision = p->range_precision;
-    cell->filled          = true;
-    c->status_hist[(p->dis_status < 3u) ? p->dis_status : 3u]++;
-
-    c->scan_end_ns = cell->rx_ns;
-    c->pc_written++;
 }
 
 /* organized PCD 출력 (변환 후 x/y/z, meter).
@@ -596,7 +705,7 @@ static void write_pcd(struct core *c)
         } else {
             const double pan  = DDEG2RAD(cell->pan_ddeg);
             const double tilt = DDEG2RAD(cell->tilt_ddeg);
-            const double r    = (double)cell->d_mm / 1000.0;    /* mm → m */
+            const double r    = (double)cell_distance_mm(cell) / 1000.0;
             const double ct   = cos(tilt);
 
             (void)fprintf(fp, "%.4f %.4f %.4f\n",
@@ -616,6 +725,18 @@ static void write_json(struct core *c)
     if (fp == NULL) {
         core_log(c, "SCAN", "JSON 생성 실패 %s: %s", c->js_path, strerror(errno));
         return;
+    }
+
+    /* 헤더의 진단 수치를 먼저 확정한다 — 셀 루프보다 앞에 찍히기 때문. */
+    c->avg_refused = 0u;
+    {
+        const size_t nc = (size_t)c->grid_rows * (size_t)c->grid_cols;
+        for (size_t k = 0; k < nc; ++k) {
+            const struct scan_cell *cl = &c->grid[k];
+            if ((cl->n_samples >= 2u) && !cell_avg_ok(cl)) {
+                c->avg_refused++;
+            }
+        }
     }
 
     const struct scan_request *rq = &c->ctx.req;
@@ -687,7 +808,8 @@ static void write_json(struct core *c)
         "  },\n"
         "  \"diagnostics\": {\n"
         "    \"checksum_error_count\": 0,\n"
-        "    \"duplicate_cell_count\": %u,\n"
+        "    \"merged_sample_count\": %u,\n"
+        "    \"avg_refused_cell_count\": %u,\n"
         "    \"out_of_range_angle_count\": %u,\n"
         /* 0 이 아니라 null 이다. STM 이 틸트 끝점 엔코더 대조 횟수를
          * 상행하는 경로가 아직 없어 데몬은 이 값을 **모른다**. 0 으로
@@ -709,7 +831,7 @@ static void write_json(struct core *c)
         rq->pan_start_ddeg, rq->pan_end_ddeg,
         rq->tilt_start_ddeg, rq->tilt_end_ddeg,
         (unsigned)rq->step_ddeg, home_js,
-        c->drop_dup, c->drop_range,
+        c->merged, c->avg_refused, c->drop_range,
         c->status_hist[0], c->status_hist[1],
         c->status_hist[2], c->status_hist[3]);
 
@@ -729,6 +851,7 @@ static void write_json(struct core *c)
                 " \"pan_rad\": null, \"tilt_rad\": null,"
                 " \"pan_encoder_count\": null, \"tilt_encoder_count\": null,"
                 " \"distance_m\": null, \"distance_status\": null,"
+                " \"samples\": 0, \"spread_mm\": null,"
                 " \"signal_strength\": null, \"range_precision_raw\": null,"
                 " \"range_precision_m\": null,"
                 " \"checksum_valid\": null,"
@@ -757,6 +880,18 @@ static void write_json(struct core *c)
              *      Datasheet 거리구간별 표준편차(<1cm@[0.05,10]m,
              *      <6cm@[10,25]m) 또는 반복측정 실측 분산을 써야 한다. */
             /* 0xFF = 미지원/포화 → m 값을 만들지 않고 flag 로 알린다. */
+            /* 셀 병합 결과. 평균을 거부했다면 그 사실을 flag 로 남긴다 —
+             * 산포가 컸다는 건 대개 이 셀이 깊이 에지를 물었다는 뜻이라,
+             * 하류 에지 검출에 그대로 쓸 수 있는 단서다. */
+            const bool     averaged = cell_avg_ok(cell);
+            const uint32_t spread   = (uint32_t)cell->d_max_mm
+                                    - (uint32_t)cell->d_min_mm;
+            const char *avg_flag = "";
+            if (cell->n_samples >= 2u) {
+                avg_flag = averaged ? ",\"RANGE_AVERAGED\""
+                                    : ",\"AVG_REFUSED_SPREAD\"";
+            }
+
             char rp_m[24];
             const char *rp_flag;
             if (cell->range_precision == 0xFFu) {
@@ -775,6 +910,7 @@ static void write_json(struct core *c)
                 " \"pan_rad\": %.6f, \"tilt_rad\": %.6f,"
                 " \"pan_encoder_count\": null, \"tilt_encoder_count\": null,"
                 " \"distance_m\": %.4f, \"distance_status\": %u,"
+                " \"samples\": %u, \"spread_mm\": %u,"
                 " \"signal_strength\": %u, \"range_precision_raw\": %u,"
                 " \"range_precision_m\": %s,"
                 " \"checksum_valid\": true,"
@@ -782,17 +918,18 @@ static void write_json(struct core *c)
                 " \"timestamp_source\": \"host_rx_monotonic\","
                 " \"encoder_interpolation_valid\": null,"
                 " \"valid\": true,"
-                " \"quality_flags\": [\"VALID_RANGE\"%s] }%s\n",
+                " \"quality_flags\": [\"VALID_RANGE\"%s%s] }%s\n",
                 cell->seq, row, col,
                 (unsigned long long)cell->rx_ns,
                 (unsigned)cell->device_time_ms,
                 (unsigned)cell->stm_ts_ms,
                 DDEG2RAD(cell->pan_ddeg), DDEG2RAD(cell->tilt_ddeg),
-                (double)cell->d_mm / 1000.0,
+                (double)cell_distance_mm(cell) / 1000.0,
                 (unsigned)cell->dis_status,
+                (unsigned)cell->n_samples, (unsigned)spread,
                 (unsigned)cell->signal_strength,
                 (unsigned)cell->range_precision,
-                rp_m, rp_flag, sep);
+                rp_m, avg_flag, rp_flag, sep);
         }
     }
 
@@ -809,8 +946,10 @@ static void pc_close(struct core *c)
     write_json(c);      /* 변환 전 원시 (계약) */
     write_pcd(c);       /* 변환 후 x/y/z (뷰어·편의) */
 
-    core_log(c, "SCAN", "산출 완료 %ux%u — 유효 %u점 (중복 %u, 범위밖 %u)",
-             c->grid_rows, c->grid_cols, c->pc_written, c->drop_dup, c->drop_range);
+    core_log(c, "SCAN",
+             "산출 완료 %ux%u — 유효 %u셀 (병합 %u, 평균거부 %u, 범위밖 %u)",
+             c->grid_rows, c->grid_cols, c->pc_written,
+             c->merged, c->avg_refused, c->drop_range);
     core_log(c, "SCAN", "  JSON: %s", c->js_path);
     core_log(c, "SCAN", "  PCD : %s", c->pc_path);
 
@@ -873,8 +1012,8 @@ static bool level_gate_ok(struct core *c)
  *     팬 0   줄 -> 방위 0, 180
  *     팬 180 줄 -> 방위 180, 360(=0)
  * 방위 0 과 180 만 두 번 측정되고 나머지는 한 번씩이라, 그 두 평면의 점은
- * drop_dup 으로 버려진다. 데이터가 틀리진 않지만 스캔 시간을 헛쓰는 것이고
- * 산출물의 중복 통계가 부풀어 원인을 오해하기 쉽다.
+ * 같은 셀에 몰려 병합된다. 데이터가 틀리진 않지만 스캔 시간을 헛쓰는 것이고
+ * 산출물의 병합 통계가 부풀어 원인을 오해하기 쉽다.
  *
  * 팬을 (한 바퀴 - 1스텝) 까지만 돌리면 정확히 0 이 된다. 예) 1도 격자면 0~179.
  * (실측: 0~180 = 중복 180건 / 0~179 = 0건) */
