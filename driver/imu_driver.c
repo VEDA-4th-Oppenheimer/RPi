@@ -73,9 +73,12 @@ static ssize_t imu_read(struct file *filep, char __user *buffer, size_t len, lof
         return -EIO;
     }
 
-    /* 임시 디버그: raw byte가 매 호출마다 실제로 바뀌는지 확인용.
-     * 문제 해결 후에는 제거하거나 pr_debug로 낮춰서 평소엔 안 찍히게 하세요. */
-    pr_info("IMU Driver: raw = %02x %02x %02x %02x %02x %02x\n",
+    /* raw byte 덤프. 데몬이 1Hz 로 계속 읽으므로 pr_info 면 dmesg 가 끝없이
+     * 쌓인다 — 정작 봐야 할 커널 메시지가 밀려나므로 pr_debug 로 낮춘다.
+     * 필요할 때만 켠다:
+     *   echo 'file imu_driver.c +p' > /sys/kernel/debug/dynamic_debug/control
+     * (CONFIG_DYNAMIC_DEBUG 가 없으면 모듈을 -DDEBUG 로 빌드) */
+    pr_debug("IMU Driver: raw = %02x %02x %02x %02x %02x %02x\n",
              raw_buf[0], raw_buf[1], raw_buf[2],
              raw_buf[3], raw_buf[4], raw_buf[5]);
 
