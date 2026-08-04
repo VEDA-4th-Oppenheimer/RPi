@@ -1,0 +1,30 @@
+# ============================================================================
+#  mosquitto.conf — ADTS 스캐너 킷 브로커 (RPi 상주)
+#  배치:  sudo cp mosquitto.conf.example /etc/mosquitto/conf.d/adts.conf
+#  재시작: sudo systemctl restart mosquitto
+# ============================================================================
+
+# --- TLS + mTLS (8883) — Qt 관제·카메라·데몬 공용 -------------------------
+listener 8883
+
+cafile   /etc/adts/certs/ca.crt
+certfile /etc/adts/certs/server.crt
+keyfile  /etc/adts/certs/server.key
+
+#  클라이언트도 인증서를 내야 한다. 이게 mTLS 와 단방향 TLS 의 차이다.
+require_certificate true
+
+#  인증서 CN 을 username 으로 삼는다 → 아래 ACL 이 신원 기반으로 동작한다.
+#    CN=qt-console / CN=adts-daemon / CN=camera
+use_identity_as_username true
+
+allow_anonymous false
+
+# --- 토픽 권한 (Confluence 31162383 계약 기준) ----------------------------
+#  카메라가 실수로 스캔을 트리거하는 사고를 구조적으로 막는다.
+acl_file /etc/mosquitto/conf.d/adts.acl
+
+# --- 로그 ------------------------------------------------------------------
+log_type error
+log_type warning
+log_type notice

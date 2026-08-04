@@ -4,6 +4,8 @@
 *.mod
 *.mod.c
 *.mod.o
+*.d
+.*.d
 *.symvers
 modules.order
 Module.symvers
@@ -13,9 +15,13 @@ Module.symvers
 
 # ── 유저 앱 / 데몬 빌드 산출물 ──
 turret_test
+imu_test
+adts_daemon*
 build/
-build_host/
 build-arm64/
+build_host/
+cmake-build-debug/
+cmake-build-*/
 compile_commands.json
 *.a
 *.so
@@ -25,3 +31,18 @@ compile_commands.json
 .cache/
 .vscode/
 .DS_Store
+.claude
+
+# ── 🔐 인증서·키 (절대 커밋 금지) ──
+#  gen-certs.sh 가 만드는 산출물. 개인키가 레포에 들어가면 되돌릴 수 없다
+#  (히스토리에 남아 push 된 순간 유출로 간주하고 전부 재발급해야 함).
+#  *.example 은 설정 템플릿이라 예외로 추적한다.
+*.key
+*.crt
+*.pem
+*.csr
+*.srl
+*.p12
+*.pfx
+certs/
+!*.example

@@ -57,6 +57,19 @@ static void print_state(const struct turret_link_state *s)
 	       (s->flags & STF_HOMED) ? 1 : 0,
 	       (s->flags & STF_SCANNING) ? 1 : 0,
 	       s->cur_pan_ddeg, s->cur_tilt_ddeg, s->last_err, s->pong_seq);
+
+	/* v5: 홈 결과. 엔코더 raw 를 같이 찍어야 영점 상수가 맞는지 눈으로
+	 * 검산할 수 있다 (raw/16384*360 == ddeg/10 + 영점). */
+	if (s->flags & STF_HOMED) {
+		printf("  home: pan  raw=%5u (%6.2f deg) -> %d ddeg\n"
+		       "        tilt raw=%5u (%6.2f deg) -> %d ddeg\n",
+		       s->home_pan_encoder_raw,
+		       s->home_pan_encoder_raw * 360.0 / 16384.0,
+		       s->home_pan_ddeg,
+		       s->home_tilt_encoder_raw,
+		       s->home_tilt_encoder_raw * 360.0 / 16384.0,
+		       s->home_tilt_ddeg);
+	}
 }
 
 /* poll()+read() 로 스캔 점 스트림 수신. SCAN_DONE(스캐닝 해제) or 타임아웃까지. */
@@ -94,12 +107,20 @@ static int do_stream(int fd, int timeout_ms)
 				int cnt = (int)(n / (ssize_t)sizeof(pts[0]));
 
 				total += (unsigned long)cnt;
-				/* 배치 끝 점만 샘플 출력(플러딩 방지) */
-				printf("  +%d점 (누적 %lu)  마지막: θ=%d φ=%d d=%umm\n",
+				/* 배치 끝 점만 샘플 출력(플러딩 방지).
+				 * v5 필드까지 찍는다 — 브링업에서 "거리는 오는데
+				 * dis_status 가 0" / "signal 이 바닥" 같은 증상을
+				 * 로그 한 줄로 구분하려고. */
+				printf("  +%d점 (누적 %lu)  마지막: pan=%d tilt=%d "
+				       "d=%umm sig=%u st=%u t_dev=%ums t_stm=%ums\n",
 				       cnt, total,
 				       pts[cnt - 1].pan_ddeg,
 				       pts[cnt - 1].tilt_ddeg,
-				       pts[cnt - 1].d_mm);
+				       pts[cnt - 1].d_mm,
+				       pts[cnt - 1].signal_strength,
+				       pts[cnt - 1].dis_status,
+				       pts[cnt - 1].device_time_ms,
+				       pts[cnt - 1].stm_ts_ms);
 			} else if (n < 0 && errno != EAGAIN) {
 				perror("read");
 				return -1;
