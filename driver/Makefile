@@ -46,7 +46,10 @@ APP_CFLAGS := -Wall -Wextra -Werror \
               -z relro -z now
 
 # ── 커널 모듈 (kbuild) ──
+#  두 모듈은 서로 독립이다. /dev/turret 은 serdev(UART), /dev/imu 는 I2C
+#  클라이언트라 공유하는 것이 없다. 요건 ③(자작 드라이버) 근거이기도 하다.
 obj-m     += turret_driver.o
+obj-m     += imu_driver.o
 ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
 
 # ── 유저 앱: protocol.h 위치 자동 탐색 (../shared 우선) ──
@@ -55,9 +58,9 @@ PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $
 # ── 타겟 ──
 .PHONY: all rpi modules clean dtbo
 
-all: modules turret_test
+all: modules turret_test imu_test
 
-# 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + turret_test 둘 다 arm64
+# 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + 유저 앱 전부 arm64
 rpi:
 	$(MAKE) ARCH=$(RPI_ARCH) CROSS_COMPILE=$(RPI_CROSS) KDIR=$(RPI_KDIR) all
 
@@ -67,6 +70,11 @@ modules:
 turret_test: turret_test.c $(PROTO_H)
 	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
 
+# /dev/imu 테스트 앱. protocol.h 를 쓰지 않는다 (IMU 는 RPi I2C 직결이라
+# STM32 프로토콜과 무관) — 그래서 PROTO_WANT_IOCTL 도 -I../shared 도 없다.
+imu_test: imu_test.c
+	$(APP_CC) $(APP_CFLAGS) -o $@ $< -lm
+
 dtbo: turret-overlay.dtbo
 
 turret-overlay.dtbo: turret-overlay.dts
@@ -74,4 +82,4 @@ turret-overlay.dtbo: turret-overlay.dts
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f turret_test turret-overlay.dtbo
+	rm -f turret_test imu_test turret-overlay.dtbo
