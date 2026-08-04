@@ -1,65 +1,191 @@
 /* ============================================================================
- *  imu_module.c  --  /dev/imu (MPU-6050) 수평 기준 제공  [STUB]
- *  담당: 송영빈 (드라이버 + 이 모듈)
+ *  imu_module.c  --  /dev/imu (MPU-6050) 수평 기준 제공
+ *  담당: 송영빈 (커널 드라이버 + 참조 구현) / 이현우 (데몬 모듈 연동)
  *
  *  MPU-6050(6축) 을 RPi I2C 에 직결하고 자작 캐릭터 드라이버 /dev/imu 로 노출.
  *  이 모듈은 가속도계 중력벡터를 읽어 roll/pitch 를 산출해 ctx->level 에 채운다.
  *
  *  ★ 역할 분리: "측정"은 이 모듈, "판정(수평 게이트)"은 코어가 한다.
- *    코어는 SCANNING 진입 시 ctx->level 을 보고 LEVEL_GATE_MAX_DEG 초과면 거부.
+ *    코어 level_gate_ok() 가 SCANNING 진입 시 ctx->level 을 보고
+ *    LEVEL_GATE_MAX_DEG(1.5도) 초과면 스캔을 거부한다.
  *    (방식 A = 게이트. 좌표 회전보정 아님 — 수평을 보장한 뒤 스캔한다.)
  *
- *  ★ roll/pitch 원본은 버리지 말 것: 향후 방식 B(보정) 확장 시 그대로 재사용.
+ *  ★ roll/pitch 원본은 버리지 않는다: 향후 방식 B(보정) 확장 시 그대로 재사용.
+ *    ctx->level 은 mqtt_module 이 adts/state/daemon 의 "level" 블록으로
+ *    그대로 발행하므로 Qt 관제에서도 실시간으로 보인다.
  *
- *  중력벡터 -> 각도 (가속도계 ax,ay,az):
- *      roll  = atan2(ay, az)                        * 180/PI
- *      pitch = atan2(-ax, sqrt(ay*ay + az*az))      * 180/PI
+ *  ── /dev/imu 계약 (driver/imu_driver.c) ──────────────────────────────────
+ *    read(fd, buf, 6) 이 MPU-6050 레지스터 0x3B(ACCEL_XOUT_H) 부터 6바이트를
+ *    **원본 그대로** 준다. 즉 ax/ay/az 각각 **빅엔디안 int16** 이다.
+ *      buf[0..1] = ax,  buf[2..3] = ay,  buf[4..5] = az
+ *    len < 6 이면 -EINVAL, 드라이버는 떴는데 칩이 없으면 -ENODEV/-EIO.
  *
- *  ※ 스캔 전 1회성 판정이라 실시간성이 필요 없다. 다만 I2C read 는 블로킹이므로
- *    on_tick 에서 매번 읽지 말고 저속(예: 1초)으로 갱신한다(단일 스레드 보호).
+ *  ── 중력벡터 -> 각도 (driver/imu_test.c 와 동일한 식) ────────────────────
+ *      roll  = atan2(ay, az)
+ *      pitch = atan2(-ax, sqrt(ay^2 + az^2))
+ *
+ *    스케일 16384 LSB/g (±2g 기본 설정) 도 imu_test.c 를 그대로 따른다.
+ *    ⚠️ 사실 atan2 는 비율만 쓰므로 스케일이 결과를 바꾸지 않는다. 그래도
+ *      맞춰두는 이유는 같은 장비를 두 프로그램이 읽을 때 숫자가 어긋나면
+ *      "어느 쪽이 맞나" 를 매번 따지게 되기 때문이다.
+ *
+ *  ⚠️ read() 는 블로킹 I2C 다. 스캔 전 1회성 판정이라 실시간성이 없으므로
+ *    저속(1초)으로만 갱신하고, 스캔 중에는 아예 읽지 않는다 — 단일스레드
+ *    epoll 루프가 I2C 왕복만큼 멈추면 라이다 점 배치 수신이 밀린다.
  * ==========================================================================*/
 #include "daemon_module.h"
-#include <stdio.h>
 
-/* #define IMU_DEV "/dev/imu" */
+#include <errno.h>
+#include <fcntl.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#define IMU_DEV            "/dev/imu"
+#define IMU_SAMPLE_BYTES   6
+#define IMU_PERIOD_MS      1000u    /* 사람이 수평을 맞추는 속도면 1Hz 로 충분 */
+#define IMU_ERR_LOG_EVERY  10u      /* 연속 실패 로그 도배 방지 */
+#define IMU_ACCEL_LSB_PER_G 16384.0f  /* ±2g 기본 설정 (imu_test.c 와 동일) */
+
+static int      s_fd = -1;
+static uint64_t s_last_ms;
+static uint32_t s_err_run;
+static uint8_t  s_first_report;      /* 0=아직, 1=정상 보고함, 2=이상 보고함 */
+
+static uint64_t imu_mono_ms(void)
+{
+    struct timespec ts;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((uint64_t)ts.tv_sec * 1000u) + ((uint64_t)ts.tv_nsec / 1000000u);
+}
+
+/* 빅엔디안 int16 복원. MPU-6050 은 상위 바이트가 먼저다. */
+static int16_t imu_be16(const unsigned char *p)
+{
+    return (int16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
 
 static int imu_init(struct shared_ctx *ctx)
 {
-    ctx->level.valid = 0u;      /* 아직 측정 없음 (코어가 게이트 생략 로그) */
-    /* TODO(송영빈): open(IMU_DEV) — 없으면 degraded 로 계속(0 반환)
-     *   드라이버가 없을 때 데몬 전체가 죽으면 개발이 막히므로 실패해도 0 반환. */
-    (void)fprintf(stderr,
-        "[imu     ] init (STUB — /dev/imu 미구현. 송영빈)\n");
+    ctx->level.valid     = 0u;
+    ctx->level.roll_deg  = 0.0f;
+    ctx->level.pitch_deg = 0.0f;
+
+    /* ⚠️ 열기 실패해도 0(성공) 을 반환한다. IMU 가 없다고 데몬 전체가 죽으면
+     *   개발이 막히고, 코어는 level.valid==0 을 "게이트 생략" 으로 이미
+     *   처리한다(그때 경고 로그가 남는다). */
+    s_fd = open(IMU_DEV, O_RDONLY | O_CLOEXEC);
+    if (s_fd < 0) {
+        (void)fprintf(stderr,
+            "[imu     ] %s 열기 실패(%s) — 수평 게이트 없이 진행\n",
+            IMU_DEV, strerror(errno));
+    } else {
+        (void)fprintf(stderr, "[imu     ] init (%s, %ums 주기)\n",
+                      IMU_DEV, IMU_PERIOD_MS);
+    }
+    s_last_ms      = 0u;
+    s_err_run      = 0u;
+    s_first_report = 0u;
     return 0;
 }
 
 static int imu_get_fd(void)
 {
-    return -1;   /* 폴링 방식(주기 read). 인터럽트 쓰면 여기서 fd 노출 */
+    /* 폴링이다. fd 를 epoll 에 넣지 않는다 — 드라이버가 poll() 을 구현하지
+     * 않고, 1Hz 주기 판독이라 이벤트 구동이 필요 없다. */
+    return -1;
 }
 
 /* cppcheck-suppress constParameterCallback ; on_tick 은 daemon_module 콜백 ABI
  * (void(*)(struct shared_ctx*, daemon_state_t)) 라 ctx 를 const 로 못 바꾼다. */
 static void imu_on_tick(struct shared_ctx *ctx, daemon_state_t state)
 {
-    (void)ctx;
-    (void)state;
-    /* TODO(송영빈): 저속(1초) 주기로 /dev/imu read -> ax,ay,az
-     *   -> roll/pitch 산출 -> ctx->level.{roll_deg,pitch_deg}, valid=1
-     *   ⚠️ I2C read 블로킹 최소화. 스캔 중(ST_SCANNING)에는 갱신 불필요. */
+    unsigned char buf[IMU_SAMPLE_BYTES];
+    ssize_t       n;
+    uint64_t      now;
+
+    /* 스캔 중에는 읽지 않는다 — 판정은 진입 시점에 이미 끝났고, 블로킹 I2C 가
+     * 점 수신 루프를 방해할 이유가 없다. */
+    if ((s_fd < 0) || (state == ST_SCANNING)) {
+        return;
+    }
+
+    now = imu_mono_ms();
+    if ((now - s_last_ms) < (uint64_t)IMU_PERIOD_MS) {
+        return;
+    }
+    s_last_ms = now;
+
+    n = read(s_fd, buf, sizeof(buf));
+    if (n != (ssize_t)IMU_SAMPLE_BYTES) {
+        /* ⚠️ 실패하면 valid 를 내린다. 낡은 값을 남겨두면 센서가 빠진 뒤에도
+         *   "수평 OK" 로 스캔이 통과해 게이트의 존재 이유가 사라진다. */
+        ctx->level.valid = 0u;
+        s_err_run++;
+        if ((s_err_run % IMU_ERR_LOG_EVERY) == 1u) {
+            (void)fprintf(stderr, "[imu     ] read 실패(%s) 연속 %u회\n",
+                          (n < 0) ? strerror(errno) : "짧은 read", s_err_run);
+        }
+        return;
+    }
+    s_err_run = 0u;
+
+    {
+        const int16_t raw_ax = imu_be16(&buf[0]);
+        const int16_t raw_ay = imu_be16(&buf[2]);
+        const int16_t raw_az = imu_be16(&buf[4]);
+
+        /* 3축이 전부 0 이면 칩이 응답만 하고 값을 안 주는 상태다(슬립 해제
+         * 실패 등). atan2(0,0) 은 0 을 돌려주므로 그대로 두면 "완벽한 수평"
+         * 으로 보여 게이트를 무사통과한다. */
+        if ((raw_ax == 0) && (raw_ay == 0) && (raw_az == 0)) {
+            ctx->level.valid = 0u;
+            if (s_first_report == 0u) {
+                (void)fprintf(stderr,
+                    "[imu     ] 가속도 3축이 모두 0 — 칩 초기화(PWR_MGMT_1) 확인\n");
+                s_first_report = 2u;
+            }
+            return;
+        }
+
+        {
+            const float ax = (float)raw_ax / IMU_ACCEL_LSB_PER_G;
+            const float ay = (float)raw_ay / IMU_ACCEL_LSB_PER_G;
+            const float az = (float)raw_az / IMU_ACCEL_LSB_PER_G;
+
+            ctx->level.roll_deg  = atan2f(ay, az) * 180.0f / (float)M_PI;
+            ctx->level.pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
+                                 * 180.0f / (float)M_PI;
+            ctx->level.valid     = 1u;
+
+            if (s_first_report == 0u) {
+                (void)fprintf(stderr,
+                    "[imu     ] 첫 측정 roll=%.2f pitch=%.2f (임계 %.1f)\n",
+                    (double)ctx->level.roll_deg,
+                    (double)ctx->level.pitch_deg,
+                    (double)LEVEL_GATE_MAX_DEG);
+                s_first_report = 1u;
+            }
+        }
+    }
 }
 
 static void imu_deinit(struct shared_ctx *ctx)
 {
-    (void)ctx;
-    /* TODO(송영빈): close(/dev/imu) */
+    ctx->level.valid = 0u;
+    if (s_fd >= 0) {
+        (void)close(s_fd);
+        s_fd = -1;
+    }
 }
 
 static const struct daemon_module k_imu = {
     "imu",
     imu_init,
     imu_get_fd,
-    NULL,          /* on_event  (fd 없음) */
+    NULL,          /* on_event  (fd 없음 — 폴링) */
     imu_on_tick,
     NULL,          /* on_state */
     imu_deinit,
