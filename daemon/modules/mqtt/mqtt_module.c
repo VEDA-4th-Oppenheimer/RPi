@@ -99,6 +99,12 @@ static uint64_t  s_last_state_ms;
 static daemon_state_t s_last_state = ST_IDLE;
 static uint8_t   s_last_err_sent;
 
+/* 수평 게이트 판정의 직전 결과. 0=미측정 / 1=OK / 2=NG.
+ * roll·pitch 숫자가 아니라 **판정**이 뒤집힐 때만 즉시 발행하기 위한 것이다.
+ * 숫자로 비교하면 손떨림 수준의 잡음에도 5초 주기가 무의미해질 만큼 발행이
+ * 잦아진다. */
+static uint8_t   s_last_level_verdict;
+
 /* ---------------------------------------------------------------------------
  *  보조
  * ------------------------------------------------------------------------- */
@@ -174,6 +180,22 @@ static cJSON *build_state(const struct shared_ctx *ctx)
     }
     (void)cJSON_AddNumberToObject(o, "ts", (double)unix_ts());
     return o;
+}
+
+/* 코어 level_gate_ok() 와 같은 기준으로 현재 수평 판정을 낸다.
+ * (판정 자체는 코어 소관이고 여기서는 "발행할 만한 변화인가" 만 본다) */
+static uint8_t level_verdict(const struct shared_ctx *ctx)
+{
+    uint8_t v = 0u;                     /* 미측정 */
+
+    if (ctx->level.valid != 0u) {
+        const float ar = (ctx->level.roll_deg  < 0.0f)
+                       ? -ctx->level.roll_deg  : ctx->level.roll_deg;
+        const float ap = (ctx->level.pitch_deg < 0.0f)
+                       ? -ctx->level.pitch_deg : ctx->level.pitch_deg;
+        v = ((ar > LEVEL_GATE_MAX_DEG) || (ap > LEVEL_GATE_MAX_DEG)) ? 2u : 1u;
+    }
+    return v;
 }
 
 static void publish_state(const struct shared_ctx *ctx)
@@ -496,8 +518,17 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
     }
 
     /* 상태는 변화 시 즉시 + 무변화여도 주기적으로 (retained 갱신 겸 생존 신호) */
-    if ((now - s_last_state_ms) >= STATE_HEARTBEAT_MS) {
-        publish_state(ctx);
+    {
+        const uint8_t verdict = level_verdict(ctx);
+
+        /* ⚠️ 수평 판정이 뒤집히면 하트비트를 기다리지 않고 바로 알린다.
+         *   "초록 뜰 때까지 각도를 맞춘다" 는 조작 UX 인데 5초 지연이면
+         *   나사를 돌리고 다섯을 세야 해서 쓸 수가 없다. */
+        if ((verdict != s_last_level_verdict) ||
+            ((now - s_last_state_ms) >= STATE_HEARTBEAT_MS)) {
+            publish_state(ctx);
+            s_last_level_verdict = verdict;
+        }
     }
 
     /* STM 오류가 새로 뜨면 이벤트로 알린다 (같은 코드 반복 발행 방지) */
