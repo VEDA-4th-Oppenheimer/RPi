@@ -304,7 +304,8 @@ static bool ensure_acl(const char *cn)
         (void)fprintf(f, "\nuser %s\n"
                          "topic write adts/cmd/#\n"
                          "topic read  adts/state/#\n"
-                         "topic read  adts/event/#\n", cn);
+                         "topic read  adts/event/#\n"
+                         "topic read  adts/config/#\n", cn);
         if (fclose(f) != 0) {
             logmsg("ERROR", "ACL 파일 쓰기를 마치지 못했습니다");
             return false;

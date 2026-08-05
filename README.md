@@ -34,6 +34,7 @@
 ├── broker/                  # Mosquitto 설정·인증서 발급 (이광진)
 │   ├── gen-certs.sh         #   CA/서버/클라이언트 인증서
 │   ├── enroll_service.c     #   /enroll 발급 서비스 (C, OpenSSL + cJSON)
+│   ├── publish-config.sh    #   카메라 설정을 retained 로 발행
 │   ├── CMakeLists.txt       #   adts_enroll 빌드
 │   ├── adts-enroll.service  #   systemd 유닛
 │   ├── enroll_tokens.example
@@ -235,6 +236,30 @@ sudo bash broker/gen-certs.sh --revoke youngbin      # 미사용 토큰 회수
   500 을 반환하고 로그에 남으므로, `/etc/mosquitto/conf.d/adts.acl` 을 확인할 것.
 - 단일 스레드로 한 연결씩 처리한다. 발급은 사람이 가끔 하는 작업이라 성능이
   문제되지 않고, 토큰·ACL 파일을 동시에 건드릴 일이 없어 잠금이 필요 없다.
+
+### 카메라 설정 배포 (`adts/config/cameras`)
+
+카메라는 사용자별 자산이 아니라 킷의 일부다. 그래서 사용자에게 입력받지 않고
+브로커가 배포한다 — 관리자가 여기서 한 번 바꾸면 접속 중인 Qt 콘솔 전부에
+즉시 반영된다.
+
+```bash
+sudo nano /etc/adts/cameras.json          # RTSP URL 수정
+sudo bash broker/publish-config.sh        # retained 로 발행
+```
+
+`publish-config.sh` 는 발행 전에 JSON 형식과 채널 번호(1~4)를 검증한다. 형식이
+깨진 채로 올리면 콘솔들이 조용히 무시하기 때문이다. 발행 주체는 데몬 인증서를
+쓰고, ACL 에서 `adts-daemon` 에게 `adts/config/#` 쓰기를 허용해 두었다.
+
+**retained 인 이유**: 나중에 켜는 콘솔도 접속하자마자 현재 값을 받아야 한다.
+retained 가 아니면 발행 시점에 붙어 있던 콘솔만 받고 늦게 켠 사람은 못 받는다.
+
+발급(`/enroll`) 응답에도 `cameras` 가 들어가지만 그건 **브로커 연결 전 초기값**
+이다. 등록 시점에 한 번 박히고 끝이라, 실제 기준은 이 토픽이다.
+
+⚠️ 파일을 고쳤으면 반드시 이 스크립트를 다시 돌려야 한다. 파일 감시는 하지
+않는다 — 설정 변경은 사람이 하는 드문 작업이라 명시적인 편이 낫다.
 
 ### 로그아웃 · 접근 차단
 
