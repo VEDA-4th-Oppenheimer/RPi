@@ -26,6 +26,14 @@
 #      qt-console.crt / .key      Qt 관제 클라이언트 (CN=qt-console)
 #      qt-console-trad.key        위 키의 전통 RSA 포맷 ← Qt 는 이걸 써야 한다
 #
+#  사용 ③  발급 토큰 관리 (관리자용 — 팀원에게 나눠줄 1회용 토큰)
+#      bash gen-certs.sh --new-token <라벨>     # 토큰 생성 + 등록 + 전달문 출력
+#      bash gen-certs.sh --list-tokens          # 아직 안 쓴 토큰 목록
+#      bash gen-certs.sh --revoke <라벨>        # 해당 라벨의 미사용 토큰 회수
+#
+#      토큰은 발급 서비스(/enroll)가 1회용으로 검증하고, 쓰이는 즉시 파일에서
+#      사라진다. 관리자는 만들어서 팀원에게 전달만 하면 된다.
+#
 #  만들어지는 것 (②):
 #      <CN>.crt / <CN>.key / <CN>-trad.key
 #
@@ -35,13 +43,124 @@
 set -euo pipefail
 
 DAYS=3650
+TOKEN_FILE="${ADTS_TOKEN_FILE:-/etc/adts/enroll_tokens}"
 
 usage() {
-    echo "사용:" >&2
-    echo "  bash gen-certs.sh <RPi_IP> [출력디렉터리]              # 전체 발급" >&2
-    echo "  bash gen-certs.sh --client <CN> [출력디렉터리]         # 클라이언트 1개 추가" >&2
+    cat >&2 <<'USAGE'
+사용:
+  bash gen-certs.sh <RPi_IP> [출력디렉터리]        # 전체 발급 (최초 1회)
+  bash gen-certs.sh --client <CN> [출력디렉터리]   # 클라이언트 인증서 1개 추가
+
+  bash gen-certs.sh --new-token <라벨>             # 1회용 발급 토큰 생성
+  bash gen-certs.sh --list-tokens                  # 미사용 토큰 목록
+  bash gen-certs.sh --revoke <라벨>                # 미사용 토큰 회수
+
+  토큰 파일 위치는 ADTS_TOKEN_FILE 로 바꾼다 (기본 /etc/adts/enroll_tokens).
+USAGE
     exit 1
 }
+
+# 라벨은 CN 접미사가 되고, CN 은 파일명과 ACL 한 줄에 그대로 들어간다.
+# 발급 시점이 아니라 **토큰을 만들 때** 걸러야 "토큰은 받았는데 발급이 500" 을 막는다.
+check_label() {
+    case "${1:-}" in
+        *[!A-Za-z0-9._-]* | "" )
+            echo "라벨에는 영숫자와 . _ - 만 쓸 수 있습니다: ${1:-<빈값>}" >&2
+            exit 1 ;;
+    esac
+}
+
+# ── 모드 ③-1 : 토큰 생성 ─────────────────────────────────────────────────────
+if [ "${1:-}" = "--new-token" ]; then
+    LABEL="${2:-}"
+    check_label "$LABEL"
+
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    touch "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+
+    # 같은 라벨의 미사용 토큰이 이미 있으면 알려준다. 여러 개 두는 것 자체는
+    # 문제가 없지만(먼저 쓴 것만 유효) 관리자가 헷갈리기 쉽다.
+    if grep -qE "^[^#[:space:]]+[[:space:]]+${LABEL}$" "$TOKEN_FILE" 2>/dev/null; then
+        echo "⚠️  '${LABEL}' 앞으로 아직 쓰지 않은 토큰이 이미 있습니다." >&2
+        echo "    회수하려면: bash gen-certs.sh --revoke ${LABEL}" >&2
+    fi
+
+    TOKEN="$(openssl rand -hex 24)"
+    printf '%s %s\n' "$TOKEN" "$LABEL" >> "$TOKEN_FILE"
+
+    # 전달문에 넣을 서버 주소 — 이 장비의 첫 번째 IPv4 를 추정한다(틀리면 직접 고쳐 전달).
+    # `hostname -I` 는 리눅스 전용이라 없는 환경도 있다. pipefail 이 켜져 있어서
+    # 실패를 삼키지 않으면 **토큰만 쓰고 안내문 없이 죽는다**(실제로 겪음).
+    IP="$( { hostname -I 2>/dev/null || true; } | awk '{print $1}' )"
+    [ -n "$IP" ] || IP="<RPi_IP>"
+
+    cat <<EOF
+
+발급 대상 CN : qt-console-${LABEL}
+토큰 파일    : ${TOKEN_FILE}
+
+── 아래를 그대로 팀원에게 전달하십시오 ──────────────────────────
+  SPATIAL-VMS 최초 설정에 입력할 값입니다.
+
+    발급 서버 주소 : ${IP}
+    포트           : 8443
+    토큰           : ${TOKEN}
+
+  앱을 처음 실행하면 등록 창이 뜹니다. 위 값을 넣고 '발급받기'를 누르면
+  인증서와 카메라 설정이 자동으로 들어갑니다. 한 번만 하면 됩니다.
+──────────────────────────────────────────────────────────────
+
+※ 1회용입니다. 사용되면 자동으로 소멸합니다.
+※ 회수: bash gen-certs.sh --revoke ${LABEL}
+EOF
+    exit 0
+fi
+
+# ── 모드 ③-2 : 미사용 토큰 목록 ──────────────────────────────────────────────
+if [ "${1:-}" = "--list-tokens" ]; then
+    if [ ! -f "$TOKEN_FILE" ]; then
+        echo "토큰 파일이 없습니다: $TOKEN_FILE"
+        exit 0
+    fi
+    echo "미사용 토큰 (${TOKEN_FILE})"
+    echo "─────────────────────────────────────────────"
+    # 토큰 전문은 찍지 않는다 — 화면·로그에 남으면 그 자체가 접근 권한이다.
+    n=0
+    while read -r tok label; do
+        case "$tok" in ''|\#*) continue ;; esac
+        [ -n "${label:-}" ] || continue
+        printf '  %-20s %s…%s\n' "$label" "${tok:0:6}" "${tok: -4}"
+        n=$((n + 1))
+    done < "$TOKEN_FILE"
+    [ "$n" -eq 0 ] && echo "  (없음)"
+    exit 0
+fi
+
+# ── 모드 ③-3 : 토큰 회수 ─────────────────────────────────────────────────────
+if [ "${1:-}" = "--revoke" ]; then
+    LABEL="${2:-}"
+    check_label "$LABEL"
+    [ -f "$TOKEN_FILE" ] || { echo "토큰 파일이 없습니다: $TOKEN_FILE" >&2; exit 1; }
+
+    BEFORE="$(grep -cE "^[^#[:space:]]+[[:space:]]+${LABEL}$" "$TOKEN_FILE" || true)"
+    if [ "$BEFORE" -eq 0 ]; then
+        echo "'${LABEL}' 앞으로 미사용 토큰이 없습니다. (이미 사용됐거나 발급된 적 없음)"
+        exit 0
+    fi
+
+    TMP="$(mktemp)"
+    # 남는 줄이 하나도 없으면 grep 이 1 을 반환한다. set -e 아래에서 그대로 두면
+    # 파일을 교체하기 전에 죽어 **회수가 안 된 채 조용히 끝난다**(실제로 겪음).
+    grep -vE "^[^#[:space:]]+[[:space:]]+${LABEL}$" "$TOKEN_FILE" > "$TMP" || true
+    chmod 600 "$TMP"
+    mv "$TMP" "$TOKEN_FILE"
+    echo "'${LABEL}' 토큰 ${BEFORE}개를 회수했습니다."
+    echo "※ 이미 발급받아 간 인증서는 그대로 유효합니다 — 그건 ACL 에서 빼야 합니다:"
+    echo "   /etc/mosquitto/conf.d/adts.acl 의 'user qt-console-${LABEL}' 블록 삭제 후"
+    echo "   sudo systemctl reload mosquitto"
+    exit 0
+fi
 
 # ── 모드 ② : 기존 CA 로 클라이언트 인증서 하나만 발급 ────────────────────────
 if [ "${1:-}" = "--client" ]; then
