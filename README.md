@@ -226,8 +226,8 @@ bash tools/run_static_analysis.sh      # repo 루트에서
 | `vision/` | 이영민 |
 | `tools/`, `.github/` | 강유근 (QA) |
 
-⚠️ `CODEOWNERS` 파일은 아직 옛 모듈 구성(`tracking/`·`meta/`·`tls/`)을 가리키고
-있어 위 표와 맞지 않는다 — 리뷰어 자동 지정이 실제로 동작하지 않는다. 정리 필요.
+GitHub 핸들은 `CODEOWNERS` 참조. 다섯 명 모두 저장소 협업자라 PR 리뷰어가
+자동 지정된다. 폴더가 늘면 `CODEOWNERS` 와 이 표를 **같이** 고칠 것.
 
 ---
 
