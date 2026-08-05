@@ -46,3 +46,7 @@ compile_commands.json
 *.pfx
 certs/
 !*.example
+
+# 발급 토큰 = 접근 권한 그 자체. example 만 커밋한다.
+enroll_tokens
+broker/build/
