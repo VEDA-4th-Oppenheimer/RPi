@@ -13,6 +13,7 @@
 #   - 전체:     bash tools/run_static_analysis.sh
 #   - 드라이버: bash tools/run_static_analysis.sh driver
 #   - 데몬:     bash tools/run_static_analysis.sh daemon
+#   - 발급서비스: bash tools/run_static_analysis.sh broker
 # =====================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.."          # tools/ -> repo 루트
@@ -76,6 +77,41 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "daemon" ]; then
     fi
   else
     echo "❌ [daemon] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
+    EXIT_CODE=1
+  fi
+fi
+
+echo "--------------------------------------------------"
+
+# ── [Track 3] 발급 서비스 분석 (cppcheck, compile_commands.json 기반) ──
+#   데몬과 같은 방식이지만 별도 CMake 프로젝트다(수명주기가 달라 타깃을 나눴다).
+if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "broker" ]; then
+  echo "==> [broker] cppcheck 분석 준비 중..."
+
+  if [ ! -f "broker/build/compile_commands.json" ]; then
+    echo "ℹ️ compile_commands.json 없음 — CMake 구성 자동 실행..."
+    if ! cmake -S broker -B broker/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON &> /dev/null; then
+      echo "❌ [broker] CMake 구성(Generate) 실패 — libssl-dev/libcjson-dev 설치 확인"
+      EXIT_CODE=1
+    fi
+  fi
+
+  if [ -f "broker/build/compile_commands.json" ]; then
+    if command -v cppcheck &> /dev/null; then
+      echo "==> [broker] cppcheck 분석 구동 중..."
+      if ! cppcheck "${CPPCHECK_COMMON[@]}" \
+        --project=broker/build/compile_commands.json; then
+        echo "❌ [broker] cppcheck 위반 발견"
+        EXIT_CODE=1
+      else
+        echo "✅ [broker] cppcheck 통과!"
+      fi
+    else
+      echo "⚠️ cppcheck 미설치 — 발급 서비스 분석 건너뜀"
+      if [ "${TARGET}" = "broker" ]; then EXIT_CODE=1; fi
+    fi
+  else
+    echo "❌ [broker] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
     EXIT_CODE=1
   fi
 fi
