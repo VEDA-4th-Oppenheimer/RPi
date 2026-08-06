@@ -2,6 +2,14 @@
 #  adts.acl — 인증서 CN 기반 토픽 권한
 #  배치: sudo cp mosquitto.acl.example /etc/mosquitto/conf.d/adts.acl
 #  ※ use_identity_as_username true 라서 user = 인증서 CN
+#
+#  ★ mosquitto 의 `user <이름>` 은 **정확 매칭**이다. 와일드카드나 접두사 매칭이
+#    없다. 그래서 사람마다 다른 CN 으로 인증서를 발급하면(발급 서비스 /enroll)
+#    그 CN 블록을 여기에 하나씩 추가해야 한다. 빠뜨리면 TLS 핸드셰이크는
+#    성공하는데 구독·발행만 조용히 막혀서 원인을 찾기 어렵다.
+#
+#  ★ 이 파일을 고친 뒤에는 반드시:  sudo systemctl reload mosquitto
+#    (재시작이 아니라 reload — SIGHUP 으로 ACL 만 다시 읽는다)
 # ============================================================================
 
 # 데몬: 명령을 받고 상태를 낸다
@@ -10,13 +18,39 @@ topic read  adts/cmd/#
 topic write adts/state/#
 topic write adts/event/#
 
-# Qt 관제: 명령을 내고 상태를 본다
+# 카메라: 스캔 결과를 읽고 캘리브 결과를 낸다. cmd 는 쓸 수 없다.
+#   — 카메라가 실수로 스캔을 트리거하는 사고를 구조적으로 막는다.
+user camera
+topic read  adts/state/scan
+topic write adts/calib/#
+
+# ============================================================================
+#  Qt 관제 콘솔
+# ----------------------------------------------------------------------------
+#  아래 세 줄(write cmd / read state / read event)이 관제 콘솔의 표준 권한이다.
+#  콘솔을 쓰는 사람마다 CN 이 다르므로 블록도 사람 수만큼 있어야 한다.
+#
+#  Client ID 는 이 권한과 무관하다. Qt 는 동시 접속 시 서로 끊기지 않도록
+#  qt-console-<호스트명>-<난수> 로 매번 다른 Client ID 를 쓰지만, 권한 판정은
+#  use_identity_as_username 에 따라 **인증서 CN** 으로만 이뤄진다.
+# ============================================================================
+
+# 공용/개발용 인증서 (gen-certs.sh 전체 발급이 만드는 기본 CN).
+# 사람별 발급으로 완전히 전환하면 이 블록은 지울 것.
 user qt-console
 topic write adts/cmd/#
 topic read  adts/state/#
 topic read  adts/event/#
 
-# 카메라: 스캔 결과를 읽고 캘리브 결과를 낸다. cmd 는 쓸 수 없다.
-user camera
-topic read  adts/state/scan
-topic write adts/calib/#
+# --- 발급 서비스가 추가하는 구간 (이 줄 아래에 append) ----------------------
+#  gen-certs.sh --client <CN> 로 발급한 뒤 아래 형식으로 붙이고 reload 한다.
+#
+#    user qt-console-youngbin
+#    topic write adts/cmd/#
+#    topic read  adts/state/#
+#    topic read  adts/event/#
+#
+#  로그아웃/기기 분실로 접근을 끊으려면 해당 블록을 지우고 reload 한다.
+#  ※ ACL 삭제는 "그 CN 으로 아무것도 못 하게" 만들 뿐, 인증서 자체는 여전히
+#    유효해서 브로커 연결(TLS 핸드셰이크)은 된다. 연결 자체를 막으려면
+#    mosquitto.conf 에 crlfile 을 걸고 인증서를 폐기 목록에 올려야 한다.
