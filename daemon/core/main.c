@@ -55,6 +55,41 @@
 #define JSON_IFACE_VERSION  "1.0"
 
 /* ---------------------------------------------------------------------------
+ *  라이다 원점 오프셋 (기구 상수, 2026-08-07 실측 84mm)
+ *
+ *  라이다가 보고하는 거리는 **자기 발광면부터** 표적까지다. 그런데 좌표계
+ *  원점은 팬/틸트 **회전축 교점**이다(회전해도 안 움직이는 유일한 점이라
+ *  원점이 될 수 있는 것도 거기뿐이다). 라이다는 틸트 브래킷에 실려 축과
+ *  같이 돌므로, 발광면은 원점에서 빔 방향으로 항상 이만큼 앞서 있다.
+ *
+ *      원점(축교점) ●────84mm────▷ 발광면 ────── d(라이다 보고) ──────▶ 표적
+ *                   └──────────── r = d + 84mm ───────────────────────┘
+ *
+ *  발광면이 빔 축 위에 있으므로(횡방향 어긋남 없음) 보정은 **방향은 그대로
+ *  두고 거리에만 더하는 순수 스칼라**다. 각도 변환식은 손댈 필요가 없다.
+ *
+ *  ⚠️ 이걸 빼먹으면 스캔한 장면 전체가 원점을 향해 84mm 수축한다. 그런데
+ *    수축은 **평행이동이 아니라 각 점의 시선 방향**이라, 평평한 면이 평평하게
+ *    나오지 않는다. 법선에서 α 만큼 벌어진 빔이 거리 H 의 평면을 볼 때
+ *
+ *        참값 r = H/cos α          →  보정 없이 찍으면 수직거리 H − 84·cos α
+ *
+ *    즉 정면(α=0)에서 84mm, α=30도에서 73mm 만큼 당겨져 **가운데가 파인
+ *    사발 모양**으로 휜다. 평면 피팅 잔차에 곡률로 남는다.
+ *
+ *    → 검증 가능한 예측: 2026-07-30 스캔은 "수직거리 1.5578m, 잔차 RMS
+ *      11.0mm" 였는데, 피팅에 쓰인 α 범위가 ±30도 근처였다면 그 11mm 는
+ *      상당 부분 센서 잡음이 아니라 **이 누락**이다(84·(1−cos30)=11.3mm).
+ *      보정 후 같은 자리를 다시 찍어 RMS 가 유의하게 떨어지면 확정.
+ *      거리도 1.5578 → 약 1.6418m 로 올라가야 한다.
+ *
+ *  ⚠️ 횡방향(빔에 수직인) 어긋남은 0 으로 가정한다. 조립상 발광면이 축 옆으로
+ *    비켜 있다면 이 스칼라 보정으로는 부족하고 회전 프레임에서 벡터로 더해야
+ *    한다. 지금 기구는 빔 축 위에 있어 해당 없음.
+ * ------------------------------------------------------------------------- */
+#define LIDAR_RANGE_OFFSET_MM   84
+
+/* ---------------------------------------------------------------------------
  *  좌표계 (PAN_TILT_LIDAR_JSON_INTERFACE.md 확정, 2026-07-29)
  *
  *    +x: right   +y: down   +z: forward
@@ -63,6 +98,11 @@
  *      x =  range · cos(tilt) · sin(pan)
  *      y = -range · sin(tilt)
  *      z =  range · cos(tilt) · cos(pan)
+ *
+ *  ⚠️ 여기서 range 는 라이다가 보고한 거리가 **아니다**.
+ *        range = distance(라이다 보고) + LIDAR_RANGE_OFFSET_MM
+ *    원점은 라이다 발광면이 아니라 팬/틸트 회전축 교점이다. 자세한 근거는
+ *    LIDAR_RANGE_OFFSET_MM 정의 위 주석 참조.
  *
  *  ⚠️ 이전 ICD(z-up: x=d·cosφ·cosθ, y=d·cosφ·sinθ, z=d·sinφ)와 **축이 다르다**.
  *    2026-07-29 이전에 생성된 .pcd 는 옛 축이므로 섞어 쓰지 말 것.
@@ -224,6 +264,11 @@ struct core {
     char     scan_id[32];
     char     pc_path[256];     /* .pcd 경로  */
     char     js_path[256];     /* .json 경로 */
+
+    /* 축교점→라이다 발광면 거리(mm). 기구 상수라 scan_request 가 아니라 여기
+     * 둔다 — 스캔마다 바뀌는 값이 아니고, 요청 구조체에 넣으면 MQTT 가 채운
+     * 요청이 0 으로 들어와 보정이 조용히 사라질 수 있다. */
+    int32_t  lidar_offset_mm;
 
     /* CLI --once : 스캔 1회 완료 후 데몬 종료 (레이어별 실행용) */
     bool     exit_after_scan;
@@ -682,7 +727,9 @@ static void write_pcd(struct core *c)
 
     (void)fprintf(fp,
         "# .PCD v0.7 - adts scan (organized)\n"
-        "# frame = lidar_scan (origin = sensor)  +x right +y down +z forward  unit = meter\n"
+        "# frame = lidar_scan (origin = pan/tilt axis intersection)"
+        "  +x right +y down +z forward  unit = meter\n"
+        "# range_offset_m = %.4f (축교점→발광면. 좌표에 **적용됨**: r = distance + offset)\n"
         "# sensor_height_m = %.4f (좌표에 미적용 — 메타데이터)\n"
         "# session=%s scan=%s\n"
         "VERSION 0.7\n"
@@ -695,6 +742,7 @@ static void write_pcd(struct core *c)
         "VIEWPOINT 0 0 0 1 0 0 0\n"
         "POINTS %zu\n"
         "DATA ascii\n",
+        (double)c->lidar_offset_mm / 1000.0,
         (double)c->ctx.req.sensor_height_mm / 1000.0,
         c->session_id, c->scan_id, c->grid_cols, c->grid_rows, n);
 
@@ -705,7 +753,10 @@ static void write_pcd(struct core *c)
         } else {
             const double pan  = DDEG2RAD(cell->pan_ddeg);
             const double tilt = DDEG2RAD(cell->tilt_ddeg);
-            const double r    = (double)cell_distance_mm(cell) / 1000.0;
+            /* 라이다 보고거리 + 축교점 오프셋. 원점이 발광면이 아니라 회전축
+             * 교점이라 이걸 더해야 한다(LIDAR_RANGE_OFFSET_MM 주석 참조). */
+            const double r    = (double)((int32_t)cell_distance_mm(cell)
+                                         + c->lidar_offset_mm) / 1000.0;
             const double ct   = cos(tilt);
 
             (void)fprintf(fp, "%.4f %.4f %.4f\n",
@@ -767,15 +818,27 @@ static void write_json(struct core *c)
     (void)fprintf(fp,
         "{\n"
         "  \"interface_version\": \"%s\",\n"
-        "  \"schema_version\": \"1.1\",\n"
+        /* 1.1 → 1.2: sensor.range_offset_m 신설. 소비자가 distance_m 로
+         * 직접 (x,y,z)를 계산하므로 **반드시 더해야 하는** 값이고, 모르고
+         * 옛 방식대로 쓰면 방 전체가 84mm 수축한다. 그래서 마이너 판올림. */
+        "  \"schema_version\": \"1.2\",\n"
         "  \"session_id\": \"%s\",\n"
         "  \"scan_id\": \"%s\",\n"
         "  \"producer\": { \"software\": \"adts_daemon\", \"protocol_version\": %u },\n"
-        "  \"sensor\": { \"model\": \"TOFSense-F2P\", \"lidar_rate_hz\": 100 },\n"
+        /* ★ range_offset_m — measurements[].distance_m 는 라이다 **발광면**
+         *   기준 원거리다. 좌표 원점은 팬/틸트 회전축 교점이므로 소비자는
+         *   반드시 r = distance_m + range_offset_m 으로 반경을 만든 뒤
+         *   구면→직교 변환해야 한다. 빠뜨리면 장면 전체가 원점 쪽으로
+         *   range_offset_m 만큼 균일하게 수축하고, 평면 잔차로는 안 잡힌다. */
+        "  \"sensor\": { \"model\": \"TOFSense-F2P\", \"lidar_rate_hz\": 100,"
+        " \"range_offset_m\": %.4f },\n"
         "  \"frame\": {\n"
         "    \"name\": \"lidar_scan\",\n"
+        "    \"origin\": \"pan_tilt_axis_intersection\",\n"
         "    \"handedness\": \"right\",\n"
-        "    \"convention\": \"+x right, +y down, +z forward; pan+ right, tilt+ up\"\n"
+        "    \"convention\": \"+x right, +y down, +z forward; pan+ right, tilt+ up\",\n"
+        "    \"range_formula\": \"r = distance_m + sensor.range_offset_m;"
+        " x = r*cos(tilt)*sin(pan), y = -r*sin(tilt), z = r*cos(tilt)*cos(pan)\"\n"
         "  },\n"
         "  \"units\": { \"distance\": \"meter\", \"angle\": \"radian\", \"timestamp\": \"nanosecond\" },\n"
         "  \"scan\": {\n"
@@ -820,6 +883,7 @@ static void write_json(struct core *c)
         "  },\n"
         "  \"measurements\": [\n",
         JSON_IFACE_VERSION, c->session_id, c->scan_id, (unsigned)PROTO_VERSION,
+        (double)c->lidar_offset_mm / 1000.0,
         c->grid_rows, c->grid_cols,
         DDEG2RAD(pan_lo),  DDEG2RAD(pan_hi),
         DDEG2RAD(tilt_lo), DDEG2RAD(tilt_hi),
@@ -1588,10 +1652,15 @@ static void usage(const char *p)
     (void)fprintf(stderr,
         "사용법:\n"
         "  %s                                   데몬 상주 (MQTT 트리거 대기)\n"
-        "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>] [--once]\n"
+        "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>]\n"
+        "       [--lidar-offset <mm>] [--once]\n"
         "\n"
         "  각도는 **기구각**, 단위 0.1도.  pan %d..%d,  tilt %d..%d,  step 10 = 1.0도\n"
         "  --height 지면→라이다 높이(mm). 좌표엔 안 들어가고 메타데이터로만 실린다.\n"
+        "  --lidar-offset  회전축 교점→라이다 발광면 거리(mm, 기본 %d).\n"
+        "           라이다는 발광면 기준 거리를 주는데 좌표 원점은 축교점이라\n"
+        "           r = 보고거리 + 이 값 으로 보정한다. **좌표에 들어간다.**\n"
+        "           기구를 바꿔 재조립했을 때만 실측해서 넘기면 된다.\n"
         "  --once   스캔 1회 완료(EXPORT)되면 종료.\n"
         "\n"
         "  ⚠ 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
@@ -1600,11 +1669,16 @@ static void usage(const char *p)
         "\n"
         "예) 방 전체 3D 스캔 (팬 0~179도, 틸트 -90~+90도, 1도 격자, 높이 2400mm):\n"
         "  %s --scan 0 1790 %d %d 10 --height 2400 --once\n",
-        p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, p, TILT_MIN, TILT_MAX);
+        p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, LIDAR_RANGE_OFFSET_MM,
+        p, TILT_MIN, TILT_MAX);
 }
 
-/* 인자 파싱. 스캔 요청이 있으면 req 를 채우고 true. */
-static bool parse_args(int argc, char **argv, struct scan_request *req, bool *once)
+/* 인자 파싱. 스캔 요청이 있으면 req 를 채우고 true.
+ *
+ * lidar_off 는 req 가 아니라 별도 출력이다 — 스캔 파라미터가 아니라 기구
+ * 상수라서(struct core 주석 참조). 호출자가 미리 기본값을 넣어두고 넘긴다. */
+static bool parse_args(int argc, char **argv, struct scan_request *req,
+                       int32_t *lidar_off, bool *once)
 {
     bool have_scan = false;
     *once = false;
@@ -1620,6 +1694,9 @@ static bool parse_args(int argc, char **argv, struct scan_request *req, bool *on
             i += 5;
         } else if ((strcmp(argv[i], "--height") == 0) && ((i + 1) < argc)) {
             req->sensor_height_mm = (int32_t)atoi(argv[i + 1]);
+            i += 1;
+        } else if ((strcmp(argv[i], "--lidar-offset") == 0) && ((i + 1) < argc)) {
+            *lidar_off = (int32_t)atoi(argv[i + 1]);
             i += 1;
         } else if (strcmp(argv[i], "--once") == 0) {
             *once = true;
@@ -1657,7 +1734,13 @@ int main(int argc, char **argv)
     struct scan_request cli_req;
     memset(&cli_req, 0, sizeof(cli_req));
     bool once = false;
-    const bool cli_scan = parse_args(argc, argv, &cli_req, &once);
+
+    /* 기구 상수라 CLI 스캔이든 MQTT 스캔이든 항상 적용된다. --lidar-offset 은
+     * 재조립 후 실측값으로 덮어쓰는 용도. */
+    core.lidar_offset_mm = LIDAR_RANGE_OFFSET_MM;
+
+    const bool cli_scan = parse_args(argc, argv, &cli_req,
+                                     &core.lidar_offset_mm, &once);
 
     if (!core_setup(&core)) {
         core_shutdown(&core);
@@ -1668,10 +1751,13 @@ int main(int argc, char **argv)
         core.ctx.req       = cli_req;
         core.ctx.req.valid = 1u;         /* 첫 tick 에서 FSM 이 SCANNING 으로 전이 */
         core.exit_after_scan = once;
-        core_log(&core, "CLI", "스캔 요청: pan[%d..%d] tilt[%d..%d] step=%u z=%dmm%s",
+        core_log(&core, "CLI",
+                 "스캔 요청: pan[%d..%d] tilt[%d..%d] step=%u z=%dmm "
+                 "lidar_offset=%dmm%s",
                  cli_req.pan_start_ddeg, cli_req.pan_end_ddeg,
                  cli_req.tilt_start_ddeg, cli_req.tilt_end_ddeg,
                  cli_req.step_ddeg, cli_req.sensor_height_mm,
+                 core.lidar_offset_mm,
                  once ? " (완료 후 종료)" : "");
     }
 
