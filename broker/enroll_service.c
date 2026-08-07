@@ -28,6 +28,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -55,6 +56,7 @@
 #define DEF_ACL_FILE    "/etc/mosquitto/conf.d/adts.acl"
 #define DEF_GEN_CERTS   "/opt/adts/gen-certs.sh"
 #define DEF_SYSTEMCTL   "/bin/systemctl"
+#define DEF_SCAN_DIR    "/home/pi/final_project/scans"
 #define DEF_BIND_PORT   8443
 #define DEF_MQTT_PORT   8883
 
@@ -68,6 +70,7 @@ static const char *g_cert_dir;
 static const char *g_token_file;
 static const char *g_camera_file;
 static const char *g_acl_file;
+static const char *g_scan_dir;
 static const char *g_gen_certs;
 static const char *g_systemctl;   /* 경로를 빼둔 이유: 배포판마다 위치가 다르고, 테스트에서 대체할 수 있어야 한다 */
 static const char *g_mqtt_host;      /* 비면 요청의 Host 헤더를 쓴다 */
@@ -347,6 +350,165 @@ static void send_error(SSL *ssl, int code, const char *reason, const char *msg)
     if (txt != NULL) { send_json(ssl, code, reason, txt); free(txt); }
 }
 
+
+/* ── GET /scan/<파일명> ──────────────────────────────────────────────────
+ *  Qt 관제가 state/scan 으로 받은 .pcd 를 실제로 가져가는 경로.
+ *  이 서비스는 인증서를 발급하는 곳이라 파일 경로를 다는 것 자체가 위험하다.
+ *  그래서 세 겹으로 막는다.
+ *    1) 검증된 클라이언트 인증서를 요구한다 (발급받은 콘솔만 접근).
+ *    2) 파일명만 받는다 — '/' 나 '%' 가 하나라도 있으면 거부. 디렉터리는
+ *       g_scan_dir 로 고정이라 경로 탈출이 성립할 수 없다.
+ *    3) 확장자는 .pcd 만.
+ *  '%' 를 디코드하지 않고 그냥 거부하는 이유: 스캔 파일명은 영숫자와 -_. 뿐이라
+ *  인코딩이 필요 없고, 디코더를 두면 그 자체가 새로운 우회 표면이 된다.
+ */
+static int scan_name_ok(const char *name)
+{
+    size_t i;
+    const size_t n = strlen(name);
+
+    if ((n == 0u) || (n > 160u)) { return 0; }
+    if (strstr(name, "..") != NULL) { return 0; }
+    if ((n < 5u) || (strcmp(name + (n - 4u), ".pcd") != 0)) { return 0; }
+
+    for (i = 0u; i < n; ++i) {
+        const char c = name[i];
+        const int alnum = (((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) ||
+                           ((c >= '0') && (c <= '9')));
+        if ((alnum == 0) && (c != '-') && (c != '_') && (c != '.')) { return 0; }
+    }
+    return 1;
+}
+
+
+/* ── GET /scans ──────────────────────────────────────────────────────────
+ *  스캔 파일 목록. /scan 과 같은 조건(검증된 클라이언트 인증서)을 요구한다.
+ *  파일명·크기·수정시각만 준다 — 경로는 주지 않는다. 클라이언트는 파일명만
+ *  알면 되고, 서버가 디렉터리를 고정하고 있어서 경로를 노출할 이유가 없다.
+ */
+static void send_scan_list(SSL *ssl, const char *peer)
+{
+    DIR           *d;
+    struct dirent *de;
+    cJSON         *root;
+    cJSON         *arr;
+    char          *txt;
+    int            n = 0;
+
+    {
+        X509      *cert = SSL_get1_peer_certificate(ssl);
+        const long vr   = SSL_get_verify_result(ssl);
+        if ((cert == NULL) || (vr != X509_V_OK)) {
+            if (cert != NULL) { X509_free(cert); }
+            send_error(ssl, 401, "Unauthorized", "클라이언트 인증서가 필요합니다");
+            return;
+        }
+        X509_free(cert);
+    }
+
+    d = opendir(g_scan_dir);
+    if (d == NULL) {
+        send_error(ssl, 404, "Not Found", "스캔 디렉터리가 없습니다");
+        return;
+    }
+
+    root = cJSON_CreateObject();
+    arr  = cJSON_CreateArray();
+    if ((root == NULL) || (arr == NULL)) {
+        (void)closedir(d);
+        if (root != NULL) { cJSON_Delete(root); }
+        if (arr != NULL)  { cJSON_Delete(arr); }
+        send_error(ssl, 500, "Internal Server Error", "메모리 부족");
+        return;
+    }
+
+    while (((de = readdir(d)) != NULL) && (n < 500)) {
+        char        path[640];
+        struct stat st;
+        cJSON      *item;
+
+        if (scan_name_ok(de->d_name) == 0) { continue; }
+        (void)snprintf(path, sizeof path, "%s/%s", g_scan_dir, de->d_name);
+        if ((stat(path, &st) != 0) || (S_ISREG(st.st_mode) == 0)) { continue; }
+
+        item = cJSON_CreateObject();
+        if (item == NULL) { break; }
+        (void)cJSON_AddStringToObject(item, "name", de->d_name);
+        (void)cJSON_AddNumberToObject(item, "size", (double)st.st_size);
+        (void)cJSON_AddNumberToObject(item, "mtime", (double)st.st_mtime);
+        (void)cJSON_AddItemToArray(arr, item);
+        ++n;
+    }
+    (void)closedir(d);
+
+    (void)cJSON_AddItemToObject(root, "scans", arr);
+    txt = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (txt == NULL) { send_error(ssl, 500, "Internal Server Error", "직렬화 실패"); return; }
+    send_json(ssl, 200, "OK", txt);
+    free(txt);
+    logmsg("INFO", "%s: /scans %d건", peer, n);
+}
+
+static void send_scan_file(SSL *ssl, const char *name, const char *peer)
+{
+    char        path[640];
+    struct stat st;
+    int         fd;
+    char        head[256];
+    int         hn;
+
+    /* 1) 클라이언트 인증서 검증 */
+    {
+        X509 *cert = SSL_get1_peer_certificate(ssl);
+        const long vr = SSL_get_verify_result(ssl);
+        if ((cert == NULL) || (vr != X509_V_OK)) {
+            if (cert != NULL) { X509_free(cert); }
+            logmsg("WARN", "%s: /scan 거부 — 클라이언트 인증서 없음/검증 실패", peer);
+            send_error(ssl, 401, "Unauthorized",
+                       "클라이언트 인증서가 필요합니다 (발급받은 콘솔만 내려받을 수 있습니다)");
+            return;
+        }
+        X509_free(cert);
+    }
+
+    /* 2) 파일명 검사 */
+    if (scan_name_ok(name) == 0) {
+        logmsg("WARN", "%s: /scan 거부 — 파일명 규칙 위반", peer);
+        send_error(ssl, 400, "Bad Request", "파일명이 올바르지 않습니다 (.pcd, 경로 불가)");
+        return;
+    }
+
+    (void)snprintf(path, sizeof path, "%s/%s", g_scan_dir, name);
+    if ((stat(path, &st) != 0) || (S_ISREG(st.st_mode) == 0)) {
+        send_error(ssl, 404, "Not Found", "그런 스캔 파일이 없습니다");
+        return;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        send_error(ssl, 500, "Internal Server Error", "파일을 열 수 없습니다");
+        return;
+    }
+
+    hn = snprintf(head, sizeof head,
+                  "HTTP/1.1 200 OK\r\n"
+                  "Content-Type: application/octet-stream\r\n"
+                  "Content-Length: %lld\r\n"
+                  "Connection: close\r\n\r\n",
+                  (long long)st.st_size);
+    if (hn > 0) { (void)SSL_write(ssl, head, hn); }
+
+    for (;;) {
+        char    chunk[16384];
+        ssize_t r = read(fd, chunk, sizeof chunk);
+        if (r <= 0) { break; }
+        if (SSL_write(ssl, chunk, (int)r) <= 0) { break; }
+    }
+    (void)close(fd);
+    logmsg("INFO", "%s: /scan %s (%lld B) 전송", peer, name, (long long)st.st_size);
+}
+
 /* ── 요청 처리 ───────────────────────────────────────────────────────── */
 static void handle_request(SSL *ssl, const char *peer)
 {
@@ -367,6 +529,21 @@ static void handle_request(SSL *ssl, const char *peer)
 
     if (strncmp(buf, "GET /healthz ", 13) == 0) {
         send_json(ssl, 200, "OK", "{\"ok\":true}");
+        return;
+    }
+    if (strncmp(buf, "GET /scans ", 11) == 0) {
+        send_scan_list(ssl, peer);
+        return;
+    }
+    if (strncmp(buf, "GET /scan/", 10) == 0) {
+        char name[192];
+        const char *p = buf + 10;
+        size_t i = 0u;
+        while ((i + 1u < sizeof name) && (*p != ' ') && (*p != '\r') && (*p != '\0')) {
+            name[i++] = *p++;
+        }
+        name[i] = '\0';
+        send_scan_file(ssl, name, peer);
         return;
     }
     if (strncmp(buf, "POST /enroll ", 13) != 0) {
@@ -515,6 +692,7 @@ static void handle_request(SSL *ssl, const char *peer)
 int main(void)
 {
     g_cert_dir    = env_or("ADTS_CERT_DIR",    DEF_CERT_DIR);
+    g_scan_dir    = env_or("ADTS_SCAN_DIR",    DEF_SCAN_DIR);
     g_token_file  = env_or("ADTS_TOKEN_FILE",  DEF_TOKEN_FILE);
     g_camera_file = env_or("ADTS_CAMERA_FILE", DEF_CAMERA_FILE);
     g_acl_file    = env_or("ADTS_ACL_FILE",    DEF_ACL_FILE);
@@ -540,6 +718,21 @@ int main(void)
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (ctx == NULL) { logmsg("ERROR", "SSL_CTX_new 실패"); return 1; }
     (void)SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+
+    /* 클라이언트 인증서를 "받기는 하되 없어도 통과"시킨다.
+     *   - /enroll 은 인증서를 발급받기 전에 부르는 것이라 인증서를 요구할 수 없다.
+     *   - /scan 은 파일을 내주므로 검증된 인증서를 요구한다(handle_request 참고).
+     * SSL_VERIFY_PEER 만 켜고 FAIL_IF_NO_PEER_CERT 는 켜지 않는 이유가 이것이다. */
+    {
+        char ca_path[512];
+        (void)snprintf(ca_path, sizeof ca_path, "%s/ca.crt", g_cert_dir);
+        if (SSL_CTX_load_verify_locations(ctx, ca_path, NULL) != 1) {
+            logmsg("WARN", "클라이언트 CA(%s)를 읽지 못했습니다 — /scan 은 항상 거부됩니다", ca_path);
+        } else {
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+            (void)SSL_CTX_set_client_CA_list(ctx, SSL_load_client_CA_file(ca_path));
+        }
+    }
 
     if (SSL_CTX_use_certificate_file(ctx, server_crt, SSL_FILETYPE_PEM) != 1 ||
         SSL_CTX_use_PrivateKey_file(ctx, server_key, SSL_FILETYPE_PEM) != 1) {
@@ -570,6 +763,7 @@ int main(void)
 
     logmsg("INFO", "발급 서비스 시작 — https://0.0.0.0:%d/enroll", bind_port);
     logmsg("INFO", "  인증서 %s / 토큰 %s / ACL %s", g_cert_dir, g_token_file, g_acl_file);
+    logmsg("INFO", "  스캔 %s (GET /scan/<파일명>, 클라이언트 인증서 필요)", g_scan_dir);
 
     while (g_stop == 0) {
         struct sockaddr_in peer;
