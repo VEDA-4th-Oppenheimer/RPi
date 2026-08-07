@@ -172,6 +172,41 @@ POST https://<RPi>:8443/enroll
 
 `GET /healthz` 로 살아있는지 확인할 수 있다(인증서·설정은 노출하지 않는다).
 
+#### 스캔 파일 조회 `/scans` · `/scan/<파일명>`
+
+`adts/state/scan` 은 `.pcd` **경로**만 준다(계약 §9). 그 경로는 RPi 기준이라 Qt 가
+도는 PC 에는 없으므로, 발급 서비스에 읽기 전용 경로를 얹어 기존 mTLS 신뢰를 재사용한다.
+
+```
+GET /scans              → {"scans":[{"name":"...","size":123,"mtime":1786085386}, ...]}
+GET /scan/<파일명>.pcd  → 파일 본문
+```
+
+인증서를 발급하는 서비스에 파일 경로를 여는 것이라 세 겹으로 막았다. ①검증된
+클라이언트 인증서 필수(`/enroll` 은 인증서를 받기 전에 부르는 곳이라
+`FAIL_IF_NO_PEER_CERT` 를 못 켠다 — 핸들러에서 `SSL_get_verify_result` 를 직접
+본다) ②파일명만 받는다(`/` 나 `%` 가 있으면 400, 디렉터리는 `ADTS_SCAN_DIR` 고정)
+③`.pcd` 확장자만.
+
+**디렉터리가 함정이다.** `ADTS_SCAN_DIR` 은 데몬의 `SCAN_OUT_DIR`
+(`daemon/core/main.c`)과 같은 `/var/lib/adts/scans` 여야 한다. 두 가지가 겹쳐 조용히
+어긋난다.
+
+- 유닛에 `ProtectHome=true` 가 걸려 있어 **`/home` 아래는 경로가 맞아도 못 읽는다.**
+- 데몬은 `/var/lib/adts/scans` 를 못 만들면 작업 디렉터리의 `./scans` 로 폴백한다.
+  데몬을 `pi` 홈에서 띄우면 파일은 홈 아래에 쌓이고, 서비스는 하나도 못 보게 된다.
+
+이 상태의 증상은 `GET /scans` → `404 {"error":"스캔 디렉터리가 없습니다"}` 이고,
+Qt 관제에는 "로컬 N건 · 서버 목록 실패(HTTP 404)" 로 나타난다. 위 설치 절차대로
+`/var/lib/adts/scans` 를 미리 만들어 두면 양쪽이 같은 곳을 본다.
+
+```bash
+curl -s --cacert /etc/adts/certs/ca.crt \
+     --cert /etc/adts/certs/qt-console.crt \
+     --key  /etc/adts/certs/qt-console-trad.key \
+     https://localhost:8443/scans
+```
+
 #### 빌드 · 설치
 
 ```bash
@@ -183,8 +218,22 @@ sudo mkdir -p /opt/adts
 sudo cp broker/build/adts_enroll broker/gen-certs.sh /opt/adts/
 sudo cp broker/enroll_tokens.example /etc/adts/enroll_tokens
 sudo chmod 600 /etc/adts/enroll_tokens
+
+# 스캔 디렉터리 — 데몬이 쓰고 발급 서비스가 읽는 곳. 없으면 데몬이 작업
+# 디렉터리의 ./scans 로 폴백해 버려서 서비스가 파일을 하나도 못 본다(아래).
+sudo mkdir -p /var/lib/adts/scans && sudo chown pi:pi /var/lib/adts/scans
+
 sudo cp broker/adts-enroll.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now adts-enroll
+```
+
+이미 돌고 있는 서비스를 갱신할 때는 실행 중인 바이너리를 덮어쓸 수 없다
+(`Text file busy`). 멈추고 복사한 뒤 다시 띄운다.
+
+```bash
+sudo systemctl stop adts-enroll
+sudo cp broker/build/adts_enroll /opt/adts/
+sudo systemctl start adts-enroll
 ```
 
 TLS 는 브로커와 같은 `server.crt`/`server.key` 를 쓴다 — SAN 에 IP 가 들어 있어

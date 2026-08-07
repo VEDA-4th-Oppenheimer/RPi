@@ -56,7 +56,9 @@
 #define DEF_ACL_FILE    "/etc/mosquitto/conf.d/adts.acl"
 #define DEF_GEN_CERTS   "/opt/adts/gen-certs.sh"
 #define DEF_SYSTEMCTL   "/bin/systemctl"
-#define DEF_SCAN_DIR    "/home/pi/final_project/scans"
+/* 데몬(daemon/core/main.c 의 SCAN_OUT_DIR)과 같은 곳을 본다. 홈 아래를 기본값으로
+ * 두면 안 된다 — 유닛이 ProtectHome=true 라 경로가 맞아도 열리지 않는다. */
+#define DEF_SCAN_DIR    "/var/lib/adts/scans"
 #define DEF_BIND_PORT   8443
 #define DEF_MQTT_PORT   8883
 
