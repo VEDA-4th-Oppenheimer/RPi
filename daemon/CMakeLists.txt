@@ -42,6 +42,7 @@ include_directories(
 #   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우  — 현재 STUB
 add_executable(adts_daemon
     core/main.c
+    core/scan_output.c
     modules/mqtt/mqtt_module.c
     modules/imu/imu_module.c
     modules/led/led_module.c
