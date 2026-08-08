@@ -481,6 +481,7 @@ static int turret_probe(struct serdev_device *serdev)
 	dev->misc.minor = MISC_DYNAMIC_MINOR;
 	dev->misc.name  = "turret";
 	dev->misc.fops  = &turret_fops;
+	dev->misc.mode = 0666;
 
 	ret = misc_register(&dev->misc);
 	if (ret) {
