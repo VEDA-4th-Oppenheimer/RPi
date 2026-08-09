@@ -1,0 +1,60 @@
+/*
+ * imu-overlay.dts — /dev/imu (MPU-6050) Device Tree Overlay
+ *
+ * RPi I2C1 (GPIO2=SDA / GPIO3=SCL) 에 MPU-6050 을 선언한다.
+ *
+ * ── 왜 필요한가 ──
+ *   이게 없으면 커널은 "0x68 에 칩이 있다"는 사실을 모른다. i2c_add_driver()
+ *   는 드라이버만 등록할 뿐 디바이스를 만들지 않으므로 probe 가 영영 안 불린다.
+ *   그래서 지금까지는 매번 손으로 인스턴스화해야 했다:
+ *
+ *       echo mpu6050 0x68 > /sys/bus/i2c/devices/i2c-1/new_device
+ *
+ *   ⚠️ 그 방식은 **재부팅하면 사라진다.** 그러면 /dev/imu 가 없어 데몬이
+ *     수평 게이트를 조용히 생략한다(로그 한 줄만 남고 스캔은 그대로 진행).
+ *     이 오버레이가 그 수동 절차를 없앤다.
+ *
+ * ── 사전 설정 (/boot/firmware/config.txt) ──
+ *   dtparam=i2c_arm=on
+ *
+ * ── 빌드 / 적용 ──
+ *   make dtbo
+ *   (런타임) sudo dtoverlay overlays/imu-overlay.dtbo
+ *   (영구)   dtbo 를 /boot/firmware/overlays/ 에 복사 후
+ *            config.txt 에 dtoverlay=imu-overlay 추가, 재부팅
+ *
+ * ── turret-overlay 와 왜 파일을 나눴나 ──
+ *   turret 쪽은 disable-bt(블루투스를 mini-UART 로 밀어냄) + 시리얼 콘솔 해제
+ *   라는 무거운 전제를 깔고 있다. IMU 는 I2C 라 그중 아무것도 필요 없는데,
+ *   한 파일로 합치면 IMU 만 테스트하려다 블루투스와 콘솔을 잃는다.
+ *   개별로 올리고 내릴 수 있어야 브링업이 편하다.
+ *
+ * ⚠️ compatible 에 표준 문자열("invensense,mpu6050")을 쓰면 안 된다.
+ *   커널 내장 inv-mpu6050-i2c 가 같은 문자열을 물고 있어 어느 쪽이 바인딩될지
+ *   경합한다. 드라이버가 driver.name 을 "imu_mpu6050_custom" 으로 피한 것과
+ *   같은 이유로, 여기서도 우리 벤더 프리픽스를 쓴다.
+ *
+ * ⚠️ turret 노드는 reg 가 없어 유닛주소를 뗐지만(turret@0 -> turret),
+ *   I2C 자식은 reg 가 **필수**(= 슬레이브 주소)라 imu@68 이 맞다.
+ *   여기서 @68 을 빼면 dtc 가 경고한다.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&i2c1 {
+	/* ⚠️ 이 두 줄이 없으면 dtc 가 reg 를 해석하지 못해 경고를 쏟아낸다.
+	 *   오버레이는 **단독으로 컴파일**되므로 dtc 는 &i2c1 의 실제 셀 수를
+	 *   모른 채 기본값(#address-cells=2, #size-cells=1)을 가정한다. 그러면
+	 *   reg = <0x68> (4바이트) 이 "길이가 틀렸다" 로 걸린다.
+	 *   I2C 버스는 주소 1셀 / 크기 0셀이 규격이라 여기서 명시해 준다. */
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	status = "okay";
+
+	imu@68 {
+		compatible = "adts,imu-mpu6050";
+		reg = <0x68>;              /* AD0 = L → 0x68 (H 면 0x69) */
+	};
+};

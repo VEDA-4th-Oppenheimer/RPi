@@ -2,7 +2,7 @@
 #
 # RPi에서 빌드:
 #   make            커널 모듈(.ko) + 유저 테스트 앱(turret_test)
-#   make dtbo       Device Tree 오버레이(turret-overlay.dtbo)
+#   make dtbo       Device Tree 오버레이 (overlays/*.dts -> *.dtbo)
 #   make clean      정리
 #
 # ── 빌드 대상 선택 ──
@@ -75,11 +75,17 @@ turret_test: turret_test.c $(PROTO_H)
 imu_test: imu_test.c
 	$(APP_CC) $(APP_CFLAGS) -o $@ $< -lm
 
-dtbo: turret-overlay.dtbo
+# ── Device Tree 오버레이 ──
+#  overlays/ 에 *-overlay.dts 를 놓기만 하면 자동으로 잡힌다.
+#  (드라이버가 늘어날 때마다 여기를 고치지 않아도 되도록 패턴 규칙을 쓴다)
+DTS  := $(wildcard overlays/*-overlay.dts)
+DTBO := $(DTS:.dts=.dtbo)
 
-turret-overlay.dtbo: turret-overlay.dts
+dtbo: $(DTBO)
+
+overlays/%.dtbo: overlays/%.dts
 	dtc -@ -I dts -O dtb -o $@ $<
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f turret_test imu_test turret-overlay.dtbo
+	rm -f turret_test imu_test overlays/*.dtbo

@@ -20,7 +20,7 @@
 ├── driver/                  # /dev/turret 커널 드라이버 (이현우)
 │   ├── turret_driver.c      #   serdev char driver
 │   ├── turret_test.c        #   유저 테스트 앱
-│   ├── turret-overlay.dts   #   Device Tree 오버레이
+│   ├── overlays/            #   Device Tree 오버레이 (*-overlay.dts)
 │   ├── Makefile             #   kbuild + 크로스컴파일
 │   └── KERNEL_BUILD.md      #   빌드/커널 소스 정렬 가이드
 │
