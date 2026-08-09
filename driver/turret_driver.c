@@ -30,7 +30,7 @@
  *   - TURRET_SCAN_START 가 이전 스캔 잔여물을 비운다(아래 ioctl 주석 참조).
  *
  * 빌드: RPi에서  make   (Makefile 참조, -I 로 ../shared/protocol.h)
- * 사용: sudo dtoverlay turret-overlay.dtbo → sudo insmod turret_driver.ko
+ * 사용: sudo dtoverlay overlays/turret-overlay.dtbo → sudo insmod turret_driver.ko
  *       → /dev/turret 생성
  */
 
@@ -481,6 +481,7 @@ static int turret_probe(struct serdev_device *serdev)
 	dev->misc.minor = MISC_DYNAMIC_MINOR;
 	dev->misc.name  = "turret";
 	dev->misc.fops  = &turret_fops;
+	dev->misc.mode = 0666;
 
 	ret = misc_register(&dev->misc);
 	if (ret) {

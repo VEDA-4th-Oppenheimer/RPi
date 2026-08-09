@@ -21,6 +21,7 @@
 #define PROTO_WANT_IOCTL 1          /* protocol.h 의 ioctl 인터페이스 노출 */
 
 #include "daemon_module.h"
+#include "scan_output.h"
 #include "protocol.h"
 
 #include <sys/epoll.h>
@@ -45,123 +46,10 @@
 #define MAX_EVENTS    16
 #define MAX_MODULES   8
 #define TURRET_DEV    "/dev/turret"
-#define SCAN_OUT_DIR  "/var/lib/adts/scans"   /* 실패 시 ./scans 로 폴백 */
 #define SCAN_BATCH    64            /* read() 1회에 받을 최대 점 수 */
 
-/* 0.1도 -> 라디안. ★ ANGLE_SCALE(=10) 나눗셈을 빠뜨리면 좌표가 통째로 틀어진다. */
-#define DDEG2RAD(x)   (((double)(x) / (double)ANGLE_SCALE) * (M_PI / 180.0))
 
-/* JSON 인터페이스 계약 버전 (PAN_TILT_LIDAR_JSON_INTERFACE.md) */
-#define JSON_IFACE_VERSION  "1.0"
 
-/* ---------------------------------------------------------------------------
- *  좌표계 (PAN_TILT_LIDAR_JSON_INTERFACE.md 확정, 2026-07-29)
- *
- *    +x: right   +y: down   +z: forward
- *    pan positive: right    tilt positive: up
- *
- *      x =  range · cos(tilt) · sin(pan)
- *      y = -range · sin(tilt)
- *      z =  range · cos(tilt) · cos(pan)
- *
- *  ⚠️ 이전 ICD(z-up: x=d·cosφ·cosθ, y=d·cosφ·sinθ, z=d·sinφ)와 **축이 다르다**.
- *    2026-07-29 이전에 생성된 .pcd 는 옛 축이므로 섞어 쓰지 말 것.
- *  ⚠️ 단위도 mm → **meter** 로 변경(문서 01/02 계약).
- *  ⚠️ 센서 높이는 좌표에 **적용하지 않는다** — frame 이 lidar_scan(원점=센서)
- *    이기 때문. 높이는 scan.sensor_height_m 메타데이터로만 전달.
- * ------------------------------------------------------------------------- */
-
-/* ---------------------------------------------------------------------------
- *  기구각 → 계약각  (2축 천장 마운트, 2026-07-30 확정)
- *
- *  프로토콜이 나르는 각도는 **기구 각도**다. 계약 좌표계로 옮기는 건 데몬 몫
- *  (protocol.h §4). 두 각도계가 1:1 이 아닌 이유는 스윕이 nadir 를 지나서다.
- *
- *  기구 배치 — 틸트 영점 = 바닥(nadir):
- *
- *        틸트 -90 ──────── 0 ──────── +90
- *         (벽 A)        (바닥)       (벽 B)
- *
- *      틸트 = 빠른 축. 한 스윕이 벽 A → 바닥 → 벽 B (기구상 180도).
- *      팬   = 느린 축. 줄마다 1도씩, **0~180도만** 이동.
- *
- *  스윕이 바닥을 넘어가는 순간 빔은 반대편 방위를 보게 된다. 그래서 기구 팬이
- *  180도만 돌아도 계약 방위는 360도가 채워진다 (= 케이블 감김 없이 전방위):
- *
- *      m <= 0 :  pan = p          tilt = -90 - m     (벽 A 쪽 반)
- *      m >  0 :  pan = p + 180    tilt = -90 + m     (벽 B 쪽 반)
- *
- *      검산:  m = -90  →  (p,       0)   벽 A 수평
- *             m =   0  →  (p,     -90)   바닥
- *             m = +90  →  (p+180,   0)   벽 B 수평
- *
- *  ⚠️ nadir(계약 tilt=-90)는 극점이라 방위가 축퇴한다. 모든 팬 줄이 같은 점을
- *    보므로 그 행은 격자의 절반만 채워지는데, 버그가 아니라 구면 격자의 성질이다.
- * ------------------------------------------------------------------------- */
-static void mech_to_contract(int16_t mech_pan_ddeg, int16_t mech_tilt_ddeg,
-                             int16_t *out_pan_ddeg, int16_t *out_tilt_ddeg)
-{
-    int32_t pan;
-    int32_t tilt;
-
-    if (mech_tilt_ddeg <= 0) {
-        pan  = (int32_t)mech_pan_ddeg;
-        tilt = -900 - (int32_t)mech_tilt_ddeg;
-    } else {
-        pan  = (int32_t)mech_pan_ddeg + 1800;
-        tilt = -900 + (int32_t)mech_tilt_ddeg;
-    }
-
-    pan %= 3600;
-    if (pan < 0) {
-        pan += 3600;
-    }
-
-    *out_pan_ddeg  = (int16_t)pan;
-    *out_tilt_ddeg = (int16_t)tilt;
-}
-
-/* organized 격자 한 칸. filled=false 면 미측정(JSON null / PCD NaN). */
-struct scan_cell {
-    uint32_t seq;              /* sweep 내 수신 순번        */
-    uint64_t rx_ns;            /* RPi 수신 시각(mono ns)    */
-    int16_t  pan_ddeg;         /* 계약 방위 (변환 후)       */
-    int16_t  tilt_ddeg;        /* 계약 고각 (변환 후)       */
-    int16_t  mech_pan_ddeg;    /* 기구 방위 (STM 원본)      */
-    int16_t  mech_tilt_ddeg;   /* 기구 고각 (STM 원본)      */
-    uint16_t d_mm;
-    /* v5 원시 품질 필드 (라이다 프레임 원본 그대로) */
-    uint16_t signal_strength;
-    uint32_t device_time_ms;
-    uint32_t stm_ts_ms;
-    uint8_t  dis_status;
-    uint8_t  range_precision;
-    bool     filled;
-
-    /* --- 셀 내 다중 샘플 병합 -------------------------------------------
-     * 틸트 45도/s + 라이다 100Hz = 0.45도/샘플 이므로 0.9도 격자에는
-     * 샘플이 2개씩 떨어진다. 위 필드들(각도·품질·시각)은 **셀 중심에
-     * 가장 가까운 샘플**의 것이고, 거리만 따로 누적해 둔다. */
-    uint32_t d_sum_mm;         /* 도착한 샘플 거리의 합                  */
-    uint16_t d_min_mm;
-    uint16_t d_max_mm;
-    uint16_t best_off_ddeg;    /* 대표 샘플이 셀 중심에서 벗어난 정도    */
-    uint8_t  n_samples;        /* 이 셀에 도착한 샘플 수 (255 에서 포화) */
-};
-
-/* 셀 안의 샘플들을 평균해도 되는지 판정하는 산포 허용치.
- *
- * 평평한 면에서는 두 샘플이 잡음(σ<1cm)만큼만 다르므로 평균이 이득이다
- * (2개 평균 → σ/√2). 그러나 셀이 **깊이 불연속**을 물면 두 샘플이 앞뒤
- * 서로 다른 표면을 재고, 그걸 평균하면 **허공에 없는 점이 생긴다.**
- * 우리 미션이 구조 에지 기반 캘리브라 이 가짜 점이 정확도보다 훨씬 해롭다.
- *
- * 상대 허용치를 같이 두는 이유: 스치듯 비스듬한 면(천장에서 본 바닥 등)은
- * 한 셀 안에서도 거리차가 원래 크다. 절대치만 쓰면 정작 평균이 필요한
- * 자리에서 전부 거부된다. 0.9도 × 10m = 16cm 폭이고 입사각 80도면 정상
- * 깊이차가 45cm 까지 나온다 — 반면 진짜 에지는 보통 m 단위로 뛴다. */
-#define CELL_AVG_ABS_TOL_MM    30u    /* 절대 하한                        */
-#define CELL_AVG_REL_TOL_PCT   15u    /* 가까운 쪽 거리 대비 허용 비율(%) */
 
 /* ---------------------------------------------------------------------------
  *  코어 구조체
@@ -183,47 +71,21 @@ struct core {
     uint64_t hb_last_pong;     /* 마지막 PONG 관측 시각(mono ms)    */
     bool     hb_primed;        /* 최초 GET_STATE 로 기준선 설정 여부 */
 
-    /* CMD_HOMED 결과 캐시 (protocol v5). 산출물 헤더의 provenance 로 나간다.
-     * 엔코더 원본을 같이 남기는 이유는, 영점 상수가 나중에 틀렸다고 밝혀져도
-     * raw 로부터 각도를 재계산해 이미 찍어둔 스캔을 살릴 수 있어야 해서다. */
-    bool     home_valid;
-    uint16_t home_pan_raw;
-    uint16_t home_tilt_raw;
-    int16_t  home_pan_ddeg;
-    int16_t  home_tilt_ddeg;
 
     /* 스캔 전 자동 홈. STM 은 홈 전 SCAN_START 를 ERR_NOT_HOMED 로 거절하므로
      * 요청이 들어오면 먼저 홈을 세우고 STF_HOMED 를 기다린다. */
     uint64_t home_req_first_ms;   /* 첫 요청 시각 (0 = 요청 안 함)  */
     uint64_t home_req_last_ms;    /* 마지막 송신 시각 (재시도 간격) */
 
-    /* 스캔 출력 — organized 격자 버퍼링 후 JSON + PCD 동시 산출.
-     *
-     * 스트리밍 append 가 아니라 격자에 담는 이유:
-     *   ① (row,column) 중복 없이 organized 로 내려면 셀 단위 배치가 필요
-     *   ② 미측정 셀을 "구멍"이 아니라 null/NaN 으로 명시해야 캘리브 쪽이
-     *      "벽 없음"과 "측정 실패"를 구분할 수 있다
-     *   ③ PCD 도 organized(WIDTH=columns, HEIGHT=rows)가 되어 문서 01/02 충족
-     * 격자는 **계약각** 위에 놓인다(기구각 아님). 2축 스윕은 바닥을 넘어가며
-     * 반대편 방위까지 훑으므로 기구 팬이 180도만 돌아도 방위 축은 360도다.
-     * 메모리: 2축 1도 격자 = 고각 91 x 방위 360 = 32,760셀 x 48B ≈ 1.6MB
-     *         (1축 틸트고정이면 1 x 360 ≈ 17KB). RPi4 4GB 에 여유. */
-    struct scan_cell *grid;    /* NULL 이면 스캔 중 아님 */
-    uint32_t grid_rows;
-    uint32_t grid_cols;
-    uint32_t pc_written;       /* 격자에 채운 유효 점 수 */
-    uint32_t merged;           /* 같은 셀에 추가 도착해 병합된 샘플 수 */
-    uint32_t avg_refused;      /* 산포가 커 평균을 거부한 셀 수 (에지 추정) */
-    uint32_t drop_range;       /* 격자 범위 밖 각도 */
-    /* dis_status 분포 — Datasheet(0=invalid,1=valid) 와 User Manual 예제가
-     * 정반대라 실측으로 판별해야 한다. 인덱스 = status 값(0~3), 그 외는 [3]. */
-    uint32_t status_hist[4];
-    uint64_t scan_start_ns;
-    uint64_t scan_end_ns;
-    char     session_id[32];
-    char     scan_id[32];
-    char     pc_path[256];     /* .pcd 경로  */
-    char     js_path[256];     /* .json 경로 */
+    /* 스캔 산출물 핸들. NULL 이면 스캔 중 아님.
+     * 격자·통계·경로는 전부 scan_output.c 안에 있다 — 예전엔 그 15개 필드가
+     * 여기 섞여 있어 heartbeat/FSM 을 읽을 때도 계속 눈에 밟혔다. */
+    struct scan_out *out;
+
+    /* 축교점→라이다 발광면 거리(mm). 기구 상수라 scan_request 가 아니라 여기
+     * 둔다 — 스캔마다 바뀌는 값이 아니고, 요청 구조체에 넣으면 MQTT 가 채운
+     * 요청이 0 으로 들어와 보정이 조용히 사라질 수 있다. */
+    int32_t  lidar_offset_mm;
 
     /* CLI --once : 스캔 1회 완료 후 데몬 종료 (레이어별 실행용) */
     bool     exit_after_scan;
@@ -258,7 +120,14 @@ struct core {
  * 홈은 절대 엔코더 판독 1회라 구동이 없어 수 ms 면 끝난다. UART 왕복까지
  * 쳐도 여유가 크므로 재시도 간격은 짧게, 포기 시각은 넉넉히 잡는다. */
 #define HOME_RETRY_MS           500u
-#define HOME_TIMEOUT_MS        3000u
+
+/* ⚠️ 3000 이었는데 늘렸다. 홈이 판독만 하던 시절엔 응답이 수 ms 였지만, 지금은
+ *   판독 후 **양축을 기구각 0(홈 자세)으로 보내고** 도달·정착까지 확인한 뒤에야
+ *   CMD_HOMED 를 올린다. 최악의 경우 180도 이동(22.5도/s = 8초) + 정착 3초라
+ *   3초 타임아웃이면 정상 동작을 무응답으로 오판해 스캔이 매번 취소된다.
+ *   (STM 쪽은 홈 절차 중 들어온 CMD_HOME 재시도를 무시한다 — 안 그러면
+ *    500ms 마다 정착 대기가 처음부터 다시 시작돼 영영 안 끝난다) */
+#define HOME_TIMEOUT_MS       20000u
 
 /* ---------------------------------------------------------------------------
  *  파일 디스크립터 헬퍼 (C: RAII 없음 → 명시 관리)
@@ -325,13 +194,6 @@ static uint64_t mono_ms(void)
  *
  *   ⚠️ 이 값은 UART 큐잉 지연(수 ms)을 포함한 **수신 시각**이다. 정밀 동기가
  *     필요해지면 stm32_time_ms 와의 회귀로 offset·drift 를 추정할 것. */
-static uint64_t mono_ns(void)
-{
-    struct timespec ts;
-    memset(&ts, 0, sizeof(ts));
-    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
-}
 
 static bool epoll_add(int epfd, int fd, uint32_t events)
 {
@@ -345,636 +207,11 @@ static bool epoll_add(int epfd, int fd, uint32_t events)
 /* 전방 선언 (상호 호출) */
 static void core_transition(struct core *c, daemon_state_t want);
 
-/* ---------------------------------------------------------------------------
- *  포인트클라우드 출력 (.pcd ascii)
- *
- *   헤더의 POINTS/WIDTH 는 스캔이 끝나야 확정되므로, 자리를 고정폭으로 미리
- *   잡아두고 완료 시 그 자리에 덮어쓴다(파일 재작성 불필요).
- * ------------------------------------------------------------------------- */
-/* 격자 크기 산출.
- *   columns = 팬 스윕 폭 / 격자간격,  rows = 틸트 줄 수
- *   ordering: row 0 = tilt_max(마지막 row = tilt_min), column 0 = pan_min */
-/* organized 격자의 기하. 요청(scan_request)은 **기구각**이지만 격자는
- * **계약각** 위에 놓이므로, 요청 범위를 계약각으로 옮겨 놓은 결과다.
- *
- * 요청 자체에서 매번 계산한다(상태 없음). 점당 정수 연산 몇 개라
- * 32,000점을 돌려도 무시할 비용이고, 격자 기하가 두 곳에서 어긋날 여지를 없앤다. */
-struct grid_geom {
-    int32_t  step;              /* 격자 간격 (0.1도)              */
-    int32_t  pan_origin_ddeg;   /* col 0 의 계약 방위             */
-    int32_t  tilt_top_ddeg;     /* row 0 의 계약 고각 (가장 위)   */
-    uint32_t rows;
-    uint32_t cols;
-    bool     full_circle;       /* 방위가 360도를 다 덮는가       */
-};
-
-static void grid_geometry(const struct scan_request *r, struct grid_geom *g)
-{
-    const int32_t step = (r->step_ddeg > 0u) ? (int32_t)r->step_ddeg : 10;
-
-    const int32_t t0 = (int32_t)r->tilt_start_ddeg;
-    const int32_t t1 = (int32_t)r->tilt_end_ddeg;
-    const int32_t tlo = (t0 < t1) ? t0 : t1;
-    const int32_t thi = (t0 < t1) ? t1 : t0;
-
-    /* 계약 고각 = -900 + |기구 틸트|. 요청 구간에서 |m| 이 갖는 범위를 구한다.
-     * 구간이 0 을 품으면(= nadir 를 지나는 스윕) 최소는 0 이다. */
-    const int32_t a0 = (tlo < 0) ? -tlo : tlo;
-    const int32_t a1 = (thi < 0) ? -thi : thi;
-    const bool crosses_nadir = (tlo <= 0) && (thi >= 0);
-    const int32_t abs_min = crosses_nadir ? 0 : ((a0 < a1) ? a0 : a1);
-    const int32_t abs_max = (a0 > a1) ? a0 : a1;
-
-    g->step          = step;
-    g->tilt_top_ddeg = -900 + abs_max;                  /* row 0 = 가장 위 */
-    g->rows          = (uint32_t)((abs_max - abs_min) / step) + 1u;
-
-    /* 계약 방위 축.
-     *
-     * 스윕이 바닥을 넘어가면 한 줄이 방위 p 와 p+180 을 함께 훑는다. 이때
-     * 팬을 일부 구간만 돌리면 덮이는 방위가 **두 토막으로 갈라져** 연속된
-     * 열 축에 담기지 않는다 (예: 팬 0~90 -> 방위 0~90 과 180~270).
-     * 그래서 이 경우 방위 축은 언제나 한 바퀴로 잡고, 안 훑은 방위는 빈
-     * 셀(JSON null / PCD NaN)로 남긴다. 열 번호가 절대 방위와 1:1 이 되어
-     * 소비자 입장에서도 해석이 단순하다.
-     *
-     * ⚠️ 열 수를 "스팬/스텝 + 1" 로 잡으면 안 된다. 팬 0~179(1도)는 스팬이
-     *   179 도지만 줄은 180 개고 방위는 360 개를 덮는다. 스팬 기준으로 세면
-     *   359 가 나와 마지막 방위가 통째로 잘린다. */
-    if (crosses_nadir && (tlo < 0) && (thi > 0)) {
-        g->full_circle     = true;
-        g->cols            = (uint32_t)(3600 / step);
-        g->pan_origin_ddeg = 0;                 /* 열 0 = 절대 방위 0 도 */
-        return;
-    }
-
-    /* 여기부터는 바닥을 넘지 않는 스윕(1축 스캔 등). 방위가 한 토막이라
-     * 요청 구간을 그대로 쓴다. 틸트가 양수 쪽만이면 방위는 통째로 180도 건너편. */
-    int32_t pan_span = (int32_t)r->pan_end_ddeg - (int32_t)r->pan_start_ddeg;
-    if (pan_span < 0) {
-        pan_span += 3600;
-    }
-
-    int32_t origin = (int32_t)r->pan_start_ddeg;
-    if (tlo > 0) {
-        origin += 1800;
-    }
-    origin %= 3600;
-    if (origin < 0) {
-        origin += 3600;
-    }
-    g->pan_origin_ddeg = origin;
-
-    if ((pan_span + step) >= 3600) {
-        /* 한 바퀴를 다 덮는 경우. +1 을 붙이면 마지막 열이 첫 열과 같은
-         * 방위가 되어 영원히 비는 중복 열이 생긴다. */
-        g->full_circle = true;
-        g->cols        = (uint32_t)(3600 / step);
-    } else {
-        g->full_circle = false;
-        g->cols        = (uint32_t)(pan_span / step) + 1u;
-    }
-}
-
-static void grid_dims(const struct scan_request *r, uint32_t *rows, uint32_t *cols)
-{
-    struct grid_geom g;
-
-    grid_geometry(r, &g);
-    *rows = g.rows;
-    *cols = g.cols;
-}
-
-/* 계약 각도 → 격자 셀. 범위를 벗어나면 false. */
-static bool grid_index(const struct core *c, int16_t pan_ddeg, int16_t tilt_ddeg,
-                       uint32_t *row, uint32_t *col)
-{
-    struct grid_geom g;
-
-    grid_geometry(&c->ctx.req, &g);
-
-    int32_t dpan = (int32_t)pan_ddeg - g.pan_origin_ddeg;
-    dpan %= 3600;
-    if (dpan < 0) {
-        dpan += 3600;                                   /* 랩어라운드 */
-    }
-    int32_t ci = (dpan + (g.step / 2)) / g.step;        /* 반올림 */
-    if (g.full_circle && (ci == (int32_t)g.cols)) {
-        ci = 0;                                         /* 360도 == 0도 */
-    }
-
-    /* row 0 = tilt_top 이므로 위에서부터 센다. */
-    const int32_t ri = (g.tilt_top_ddeg - (int32_t)tilt_ddeg + (g.step / 2)) / g.step;
-
-    bool ok = false;
-    if ((ci >= 0) && ((uint32_t)ci < c->grid_cols) &&
-        (ri >= 0) && ((uint32_t)ri < c->grid_rows)) {
-        *col = (uint32_t)ci;
-        *row = (uint32_t)ri;
-        ok = true;
-    }
-    return ok;
-}
-
-static bool pc_open(struct core *c)
-{
-    /* 출력 디렉토리 준비: 시스템 경로 실패 시 현재 디렉토리로 폴백 */
-    const char *dir = SCAN_OUT_DIR;
-    if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-        dir = "./scans";
-        if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-            core_log(c, "SCAN", "출력 디렉토리 생성 실패: %s", strerror(errno));
-            return false;
-        }
-    }
-
-    time_t     now = time(NULL);
-    struct tm  tmv;
-    memset(&tmv, 0, sizeof(tmv));
-    (void)localtime_r(&now, &tmv);
-    char stamp[24];
-    (void)strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv);
-
-    (void)snprintf(c->session_id, sizeof(c->session_id), "calib-%s", stamp);
-    (void)snprintf(c->scan_id,    sizeof(c->scan_id),    "sweep-000001");
-    (void)snprintf(c->pc_path, sizeof(c->pc_path), "%s/%s_%s.pcd",
-                   dir, c->session_id, c->scan_id);
-    (void)snprintf(c->js_path, sizeof(c->js_path), "%s/%s_%s_pan_tilt_lidar.json",
-                   dir, c->session_id, c->scan_id);
-
-    grid_dims(&c->ctx.req, &c->grid_rows, &c->grid_cols);
-
-    const size_t n = (size_t)c->grid_rows * (size_t)c->grid_cols;
-    c->grid = calloc(n, sizeof(struct scan_cell));
-    if (c->grid == NULL) {
-        core_log(c, "SCAN", "격자 할당 실패 (%ux%u)", c->grid_rows, c->grid_cols);
-        return false;
-    }
-
-    c->pc_written    = 0u;
-    c->merged        = 0u;
-    c->avg_refused   = 0u;
-    c->drop_range    = 0u;
-    memset(c->status_hist, 0, sizeof(c->status_hist));
-    c->scan_start_ns = mono_ns();
-    c->scan_end_ns   = c->scan_start_ns;
-
-    core_log(c, "SCAN", "격자 %ux%u (%zu셀) — %s", c->grid_rows, c->grid_cols, n,
-             c->session_id);
-    return true;
-}
-
-/* 스캔 점 1개를 격자에 배치한다.
- *
- * 들어온 각도는 **기구각**이므로 먼저 계약각으로 옮긴다(mech_to_contract).
- * 격자 인덱싱도, 셀에 저장하는 각도도, 나중의 (x,y,z) 변환도 전부 계약각
- * 기준이다 — 기구각을 그대로 쓰면 바닥 넘어간 절반이 엉뚱한 방위에 쌓인다.
- *
- * 기구각도 셀에 함께 남긴다. 산출물이 이상할 때 "변환이 틀렸나 / 모터가
- * 엉뚱한 데 있었나" 를 산출물만 보고 가를 수 있어야 하기 때문. */
-/* 이 샘플이 셀 중심에서 얼마나 벗어났나 (방위+고각 이탈량의 합, 0.1도).
- * 같은 셀에 여러 샘플이 오면 이 값이 작은 쪽을 대표로 삼는다 — 격자 배정
- * 오차를 ±step/2 에서 실질적으로 절반까지 줄인다. */
-static uint16_t cell_center_offset_ddeg(const struct core *c,
-                                        uint32_t row, uint32_t col,
-                                        int16_t c_pan, int16_t c_tilt)
-{
-    struct grid_geom g;
-    grid_geometry(&c->ctx.req, &g);
-
-    int32_t dt = (int32_t)c_tilt - (g.tilt_top_ddeg - ((int32_t)row * g.step));
-    if (dt < 0) {
-        dt = -dt;
-    }
-
-    int32_t dp = (int32_t)c_pan
-               - ((g.pan_origin_ddeg + ((int32_t)col * g.step)) % 3600);
-    dp %= 3600;
-    if (dp > 1800) {
-        dp -= 3600;
-    } else if (dp < -1800) {
-        dp += 3600;
-    } else {
-        /* 이미 반바퀴 안 */
-    }
-    if (dp < 0) {
-        dp = -dp;
-    }
-
-    return (uint16_t)(dt + dp);
-}
-
-/* 셀 안의 샘플들을 평균해도 되나. 판정 근거는 struct scan_cell 위 주석. */
-static bool cell_avg_ok(const struct scan_cell *cell)
-{
-    bool ok = false;
-
-    if (cell->n_samples >= 2u) {
-        const uint32_t spread = (uint32_t)cell->d_max_mm - (uint32_t)cell->d_min_mm;
-        uint32_t tol = ((uint32_t)cell->d_min_mm * CELL_AVG_REL_TOL_PCT) / 100u;
-        if (tol < CELL_AVG_ABS_TOL_MM) {
-            tol = CELL_AVG_ABS_TOL_MM;
-        }
-        ok = (spread <= tol);
-    }
-    return ok;
-}
-
-/* 산출물에 쓸 최종 거리. 평균이 안전하면 평균, 아니면 대표 샘플 그대로. */
-static uint16_t cell_distance_mm(const struct scan_cell *cell)
-{
-    uint16_t d = cell->d_mm;
-
-    if (cell_avg_ok(cell)) {
-        d = (uint16_t)((cell->d_sum_mm + ((uint32_t)cell->n_samples / 2u))
-                       / (uint32_t)cell->n_samples);
-    }
-    return d;
-}
-
-static void pc_write_point(struct core *c, const struct proto_scan_point *p)
-{
-    uint32_t row = 0u;
-    uint32_t col = 0u;
-    int16_t  c_pan  = 0;
-    int16_t  c_tilt = 0;
-
-    if (c->grid == NULL) {
-        return;
-    }
-
-    mech_to_contract(p->pan_ddeg, p->tilt_ddeg, &c_pan, &c_tilt);
-
-    if (!grid_index(c, c_pan, c_tilt, &row, &col)) {
-        c->drop_range++;                 /* 요청 범위 밖 각도 */
-        return;
-    }
-
-    struct scan_cell *cell = &c->grid[((size_t)row * c->grid_cols) + col];
-    const uint16_t   off   = cell_center_offset_ddeg(c, row, col, c_pan, c_tilt);
-
-    c->status_hist[(p->dis_status < 3u) ? p->dis_status : 3u]++;
-    c->scan_end_ns = mono_ns();
-
-    if (!cell->filled) {
-        cell->seq           = c->pc_written;
-        cell->d_sum_mm      = (uint32_t)p->d_mm;
-        cell->d_min_mm      = p->d_mm;
-        cell->d_max_mm      = p->d_mm;
-        cell->n_samples     = 1u;
-        cell->best_off_ddeg = off;
-        cell->filled        = true;
-        c->pc_written++;
-    } else {
-        /* 같은 셀에 추가 도착. 예전에는 버렸지만(drop_dup) 그러면 스윕이
-         * 격자보다 조밀할 때 절반을 그냥 내다 버리는 셈이었다. 거리는
-         * 누적해 평균 후보로 남기고, 나머지 필드는 셀 중심에 더 가까운
-         * 샘플이 왔을 때만 교체한다. */
-        c->merged++;
-        if (cell->n_samples < 255u) {
-            cell->n_samples++;
-        }
-        cell->d_sum_mm += (uint32_t)p->d_mm;
-        if (p->d_mm < cell->d_min_mm) {
-            cell->d_min_mm = p->d_mm;
-        }
-        if (p->d_mm > cell->d_max_mm) {
-            cell->d_max_mm = p->d_mm;
-        }
-        if (off >= cell->best_off_ddeg) {
-            return;                      /* 대표를 바꿀 만큼 가깝지 않다 */
-        }
-        cell->best_off_ddeg = off;
-    }
-
-    /* 첫 샘플이거나, 셀 중심에 더 가까운 샘플로 대표를 교체하는 경우 */
-    cell->rx_ns           = c->scan_end_ns;
-    cell->pan_ddeg        = c_pan;
-    cell->tilt_ddeg       = c_tilt;
-    cell->mech_pan_ddeg   = p->pan_ddeg;
-    cell->mech_tilt_ddeg  = p->tilt_ddeg;
-    cell->d_mm            = p->d_mm;
-    cell->signal_strength = p->signal_strength;
-    cell->device_time_ms  = p->device_time_ms;
-    cell->stm_ts_ms       = p->stm_ts_ms;
-    cell->dis_status      = p->dis_status;
-    cell->range_precision = p->range_precision;
-}
-
-/* organized PCD 출력 (변환 후 x/y/z, meter).
- * 미측정 셀은 nan 으로 남겨 구멍과 실패를 구분 가능하게 한다. */
-static void write_pcd(struct core *c)
-{
-    FILE *fp = fopen(c->pc_path, "w");
-    if (fp == NULL) {
-        core_log(c, "SCAN", "PCD 생성 실패 %s: %s", c->pc_path, strerror(errno));
-        return;
-    }
-
-    const size_t n = (size_t)c->grid_rows * (size_t)c->grid_cols;
-
-    /* ⚠️ 센서 높이(z_offset)를 좌표에 **적용하지 않는다**.
-     *   frame 이름이 lidar_scan 이면 원점은 라이다 자신이므로, tilt=0 인 점의
-     *   y 는 0 이어야 한다. 예전에 높이를 빼서 모든 y 가 -1.2m 로 찍혔는데,
-     *   그건 사실상 actuator_base 계열 좌표라 라벨과 불일치였다(2026-07-29 수정).
-     *   높이는 scan.sensor_height_m 메타데이터로만 전달하고, 레이어 적층 같은
-     *   변환은 소비자(또는 json2pcd 도구의 옵션)가 수행한다. */
-
-    (void)fprintf(fp,
-        "# .PCD v0.7 - adts scan (organized)\n"
-        "# frame = lidar_scan (origin = sensor)  +x right +y down +z forward  unit = meter\n"
-        "# sensor_height_m = %.4f (좌표에 미적용 — 메타데이터)\n"
-        "# session=%s scan=%s\n"
-        "VERSION 0.7\n"
-        "FIELDS x y z\n"
-        "SIZE 4 4 4\n"
-        "TYPE F F F\n"
-        "COUNT 1 1 1\n"
-        "WIDTH %u\n"
-        "HEIGHT %u\n"
-        "VIEWPOINT 0 0 0 1 0 0 0\n"
-        "POINTS %zu\n"
-        "DATA ascii\n",
-        (double)c->ctx.req.sensor_height_mm / 1000.0,
-        c->session_id, c->scan_id, c->grid_cols, c->grid_rows, n);
-
-    for (size_t i = 0; i < n; ++i) {
-        const struct scan_cell *cell = &c->grid[i];
-        if (!cell->filled) {
-            (void)fputs("nan nan nan\n", fp);
-        } else {
-            const double pan  = DDEG2RAD(cell->pan_ddeg);
-            const double tilt = DDEG2RAD(cell->tilt_ddeg);
-            const double r    = (double)cell_distance_mm(cell) / 1000.0;
-            const double ct   = cos(tilt);
-
-            (void)fprintf(fp, "%.4f %.4f %.4f\n",
-                          r * ct * sin(pan),
-                          -r * sin(tilt),
-                          r * ct * cos(pan));
-        }
-    }
-    (void)fclose(fp);
-}
-
-/* 원시 측정 JSON 출력 (변환 전 — 계약상 golden reference).
- * x/y/z 는 넣지 않는다. 캘리브 adapter 가 distance/pan/tilt 로 직접 계산한다. */
-static void write_json(struct core *c)
-{
-    FILE *fp = fopen(c->js_path, "w");
-    if (fp == NULL) {
-        core_log(c, "SCAN", "JSON 생성 실패 %s: %s", c->js_path, strerror(errno));
-        return;
-    }
-
-    /* 헤더의 진단 수치를 먼저 확정한다 — 셀 루프보다 앞에 찍히기 때문. */
-    c->avg_refused = 0u;
-    {
-        const size_t nc = (size_t)c->grid_rows * (size_t)c->grid_cols;
-        for (size_t k = 0; k < nc; ++k) {
-            const struct scan_cell *cl = &c->grid[k];
-            if ((cl->n_samples >= 2u) && !cell_avg_ok(cl)) {
-                c->avg_refused++;
-            }
-        }
-    }
-
-    const struct scan_request *rq = &c->ctx.req;
-    const size_t n = (size_t)c->grid_rows * (size_t)c->grid_cols;
-
-    /* 격자 범위는 **계약각** 으로 적는다. 요청(rq)은 기구각이라 그대로 실으면
-     * 헤더의 pan 범위(0~180)와 measurements 의 pan(0~360)이 어긋나 소비자가
-     * 데이터를 범위 밖으로 판정한다. */
-    struct grid_geom g;
-    grid_geometry(rq, &g);
-    const int32_t pan_lo  = g.pan_origin_ddeg;
-    const int32_t pan_hi  = g.pan_origin_ddeg + (int32_t)(g.cols - 1u) * g.step;
-    const int32_t tilt_hi = g.tilt_top_ddeg;
-    const int32_t tilt_lo = g.tilt_top_ddeg - (int32_t)(g.rows - 1u) * g.step;
-
-    /* 홈 provenance. HOME 을 안 거쳤으면 null 로 남겨 "0 도였다" 와 구분한다. */
-    char home_js[160];
-    if (c->home_valid) {
-        (void)snprintf(home_js, sizeof(home_js),
-            "{ \"pan_encoder_raw\": %u, \"tilt_encoder_raw\": %u, "
-            "\"pan_ddeg\": %d, \"tilt_ddeg\": %d, \"encoder_bits\": 14 }",
-            c->home_pan_raw, c->home_tilt_raw,
-            c->home_pan_ddeg, c->home_tilt_ddeg);
-    } else {
-        (void)snprintf(home_js, sizeof(home_js), "null");
-    }
-
-    (void)fprintf(fp,
-        "{\n"
-        "  \"interface_version\": \"%s\",\n"
-        "  \"schema_version\": \"1.1\",\n"
-        "  \"session_id\": \"%s\",\n"
-        "  \"scan_id\": \"%s\",\n"
-        "  \"producer\": { \"software\": \"adts_daemon\", \"protocol_version\": %u },\n"
-        "  \"sensor\": { \"model\": \"TOFSense-F2P\", \"lidar_rate_hz\": 100 },\n"
-        "  \"frame\": {\n"
-        "    \"name\": \"lidar_scan\",\n"
-        "    \"handedness\": \"right\",\n"
-        "    \"convention\": \"+x right, +y down, +z forward; pan+ right, tilt+ up\"\n"
-        "  },\n"
-        "  \"units\": { \"distance\": \"meter\", \"angle\": \"radian\", \"timestamp\": \"nanosecond\" },\n"
-        "  \"scan\": {\n"
-        "    \"mode\": \"continuous_tilt_sweep\",\n"
-        "    \"rows\": %u,\n"
-        "    \"columns\": %u,\n"
-        "    \"pan_min_rad\": %.6f,\n"
-        "    \"pan_max_rad\": %.6f,\n"
-        "    \"tilt_min_rad\": %.6f,\n"
-        "    \"tilt_max_rad\": %.6f,\n"
-        "    \"grid_step_rad\": %.6f,\n"
-        "    \"sensor_height_m\": %.4f,\n"
-        "    \"sample_count\": %zu,\n"
-        "    \"valid_count\": %u,\n"
-        "    \"started_at_ns\": %llu,\n"
-        "    \"ended_at_ns\": %llu\n"
-        "  },\n"
-        /* 기구 원본. 계약각으로 환산하기 전 값이라, 산출물이 이상할 때
-         * 변환 문제인지 구동 문제인지 가르는 근거가 된다. */
-        "  \"mechanism\": {\n"
-        "    \"sweep_axis\": \"tilt\",\n"
-        "    \"index_axis\": \"pan\",\n"
-        "    \"tilt_zero\": \"nadir\",\n"
-        "    \"angle_source\": \"step_count\",\n"
-        "    \"home_method\": \"absolute_encoder\",\n"
-        "    \"pan_range_ddeg\": [%d, %d],\n"
-        "    \"tilt_range_ddeg\": [%d, %d],\n"
-        "    \"step_ddeg\": %u,\n"
-        "    \"home\": %s\n"
-        "  },\n"
-        "  \"diagnostics\": {\n"
-        "    \"checksum_error_count\": 0,\n"
-        "    \"merged_sample_count\": %u,\n"
-        "    \"avg_refused_cell_count\": %u,\n"
-        "    \"out_of_range_angle_count\": %u,\n"
-        /* 0 이 아니라 null 이다. STM 이 틸트 끝점 엔코더 대조 횟수를
-         * 상행하는 경로가 아직 없어 데몬은 이 값을 **모른다**. 0 으로
-         * 적으면 "대조에서 한 번도 안 틀어졌다" 는 거짓 주장이 된다. */
-        "    \"encoder_gap_count\": null,\n"
-        "    \"dis_status_histogram\": "
-        "{ \"0\": %u, \"1\": %u, \"2\": %u, \"other\": %u }\n"
-        "  },\n"
-        "  \"measurements\": [\n",
-        JSON_IFACE_VERSION, c->session_id, c->scan_id, (unsigned)PROTO_VERSION,
-        c->grid_rows, c->grid_cols,
-        DDEG2RAD(pan_lo),  DDEG2RAD(pan_hi),
-        DDEG2RAD(tilt_lo), DDEG2RAD(tilt_hi),
-        DDEG2RAD((int)rq->step_ddeg),
-        (double)rq->sensor_height_mm / 1000.0,
-        n, c->pc_written,
-        (unsigned long long)c->scan_start_ns,
-        (unsigned long long)c->scan_end_ns,
-        rq->pan_start_ddeg, rq->pan_end_ddeg,
-        rq->tilt_start_ddeg, rq->tilt_end_ddeg,
-        (unsigned)rq->step_ddeg, home_js,
-        c->merged, c->avg_refused, c->drop_range,
-        c->status_hist[0], c->status_hist[1],
-        c->status_hist[2], c->status_hist[3]);
-
-    for (size_t i = 0; i < n; ++i) {
-        const struct scan_cell *cell = &c->grid[i];
-        const uint32_t row = (uint32_t)(i / c->grid_cols);
-        const uint32_t col = (uint32_t)(i % c->grid_cols);
-        const char    *sep = (i + 1u < n) ? "," : "";
-
-        if (!cell->filled) {
-            /* 미측정 셀 — 구멍이 아니라 명시적 null 로 남긴다. */
-            (void)fprintf(fp,
-                "    { \"sequence\": null, \"row\": %u, \"column\": %u,"
-                " \"timestamp_ns\": null, \"device_time_ms\": null,"
-                " \"stm32_time_ms\": null,"
-                " \"encoder_timestamp_ns\": null,"
-                " \"pan_rad\": null, \"tilt_rad\": null,"
-                " \"pan_encoder_count\": null, \"tilt_encoder_count\": null,"
-                " \"distance_m\": null, \"distance_status\": null,"
-                " \"samples\": 0, \"spread_mm\": null,"
-                " \"signal_strength\": null, \"range_precision_raw\": null,"
-                " \"range_precision_m\": null,"
-                " \"checksum_valid\": null,"
-                " \"angle_source\": null,"
-                " \"timestamp_source\": null,"
-                " \"encoder_interpolation_valid\": null,"
-                " \"valid\": false, \"quality_flags\": [\"NO_MEASUREMENT\"] }%s\n",
-                row, col, sep);
-        } else {
-            /* timestamp_ns = STM32 래치 시각(ms 해상도)을 ns 로 확장.
-             *   RPi 수신 시각보다 정확하다(UART 큐잉 지연이 안 섞임).
-             *   ⚠️ 단 STM32 clock domain 이라 host 와 offset 미보정 →
-             *      quality_flags 에 TIMESTAMP_STM_CLOCK 을 남긴다.
-             * ⚠️ 아직 null 인 필드: encoder_count / encoder_timestamp
-             *   → 강유근 MT6701 엔코더 펌웨어 구현 후 채움.
-             * range_precision (User Manual IIC 0x2C): **cm 단위**,
-             *   0x00 = <1cm, 0xFF = >=255cm.
-             *
-             * ⚠️ 실측(2026-07-29): F2 P 는 359/359 전부 **0xFF** 를 보낸다.
-             *   매뉴얼 §7.3.4 "If there is no corresponding parameter in the
-             *   register, the default output is 0xff" 에 따라 **이 모델이
-             *   지원하지 않는 필드**로 판단. 0.7m 측정에 정밀도 >=2.55m 는
-             *   스펙(±3cm)과 모순이므로 값으로 쓰면 안 된다.
-             *   → 0xFF 는 range_precision_m 을 null 로 두고 flag 로 표시.
-             *   → 02 문서 §7.1 의 depth edge 분모 sigma 는 이 필드 대신
-             *      Datasheet 거리구간별 표준편차(<1cm@[0.05,10]m,
-             *      <6cm@[10,25]m) 또는 반복측정 실측 분산을 써야 한다. */
-            /* 0xFF = 미지원/포화 → m 값을 만들지 않고 flag 로 알린다. */
-            /* 셀 병합 결과. 평균을 거부했다면 그 사실을 flag 로 남긴다 —
-             * 산포가 컸다는 건 대개 이 셀이 깊이 에지를 물었다는 뜻이라,
-             * 하류 에지 검출에 그대로 쓸 수 있는 단서다. */
-            const bool     averaged = cell_avg_ok(cell);
-            const uint32_t spread   = (uint32_t)cell->d_max_mm
-                                    - (uint32_t)cell->d_min_mm;
-            const char *avg_flag = "";
-            if (cell->n_samples >= 2u) {
-                avg_flag = averaged ? ",\"RANGE_AVERAGED\""
-                                    : ",\"AVG_REFUSED_SPREAD\"";
-            }
-
-            char rp_m[24];
-            const char *rp_flag;
-            if (cell->range_precision == 0xFFu) {
-                (void)snprintf(rp_m, sizeof(rp_m), "null");
-                rp_flag = ",\"RANGE_PRECISION_NA\"";
-            } else {
-                (void)snprintf(rp_m, sizeof(rp_m), "%.2f",
-                               (double)cell->range_precision / 100.0);
-                rp_flag = "";
-            }
-            (void)fprintf(fp,
-                "    { \"sequence\": %u, \"row\": %u, \"column\": %u,"
-                " \"timestamp_ns\": %llu, \"device_time_ms\": %u,"
-                " \"stm32_time_ms\": %u,"
-                " \"encoder_timestamp_ns\": null,"
-                " \"pan_rad\": %.6f, \"tilt_rad\": %.6f,"
-                " \"pan_encoder_count\": null, \"tilt_encoder_count\": null,"
-                " \"distance_m\": %.4f, \"distance_status\": %u,"
-                " \"samples\": %u, \"spread_mm\": %u,"
-                " \"signal_strength\": %u, \"range_precision_raw\": %u,"
-                " \"range_precision_m\": %s,"
-                " \"checksum_valid\": true,"
-                " \"angle_source\": \"step_count\","
-                " \"timestamp_source\": \"host_rx_monotonic\","
-                " \"encoder_interpolation_valid\": null,"
-                " \"valid\": true,"
-                " \"quality_flags\": [\"VALID_RANGE\"%s%s] }%s\n",
-                cell->seq, row, col,
-                (unsigned long long)cell->rx_ns,
-                (unsigned)cell->device_time_ms,
-                (unsigned)cell->stm_ts_ms,
-                DDEG2RAD(cell->pan_ddeg), DDEG2RAD(cell->tilt_ddeg),
-                (double)cell_distance_mm(cell) / 1000.0,
-                (unsigned)cell->dis_status,
-                (unsigned)cell->n_samples, (unsigned)spread,
-                (unsigned)cell->signal_strength,
-                (unsigned)cell->range_precision,
-                rp_m, avg_flag, rp_flag, sep);
-        }
-    }
-
-    (void)fprintf(fp, "  ]\n}\n");
-    (void)fclose(fp);
-}
-
-/* 격자를 두 포맷으로 산출하고 해제한다. */
-static void pc_close(struct core *c)
-{
-    if (c->grid == NULL) {
-        return;
-    }
-    write_json(c);      /* 변환 전 원시 (계약) */
-    write_pcd(c);       /* 변환 후 x/y/z (뷰어·편의) */
-
-    core_log(c, "SCAN",
-             "산출 완료 %ux%u — 유효 %u셀 (병합 %u, 평균거부 %u, 범위밖 %u)",
-             c->grid_rows, c->grid_cols, c->pc_written,
-             c->merged, c->avg_refused, c->drop_range);
-    core_log(c, "SCAN", "  JSON: %s", c->js_path);
-    core_log(c, "SCAN", "  PCD : %s", c->pc_path);
-
-    free(c->grid);
-    c->grid = NULL;
-}
 
 /* ---------------------------------------------------------------------------
  *  스캔 제어 (/dev/turret ioctl)
  * ------------------------------------------------------------------------- */
 
-/* 요청 범위·격자로 예상 점 수 산출 (진행률 표시용) */
-static uint32_t scan_expected_points(const struct scan_request *r)
-{
-    if (r->step_ddeg == 0u) {
-        return 0u;
-    }
-    const int32_t pan_span  = (int32_t)r->pan_end_ddeg  - (int32_t)r->pan_start_ddeg;
-    const int32_t tilt_span = (int32_t)r->tilt_end_ddeg - (int32_t)r->tilt_start_ddeg;
-    const int32_t pan_n  = (pan_span  < 0 ? -pan_span  : pan_span)  / (int32_t)r->step_ddeg + 1;
-    const int32_t tilt_n = (tilt_span < 0 ? -tilt_span : tilt_span) / (int32_t)r->step_ddeg + 1;
-    return (uint32_t)(pan_n * tilt_n);
-}
-
-/* 요청값이 protocol.h 의 각도 규약 안에 있는지 검사 (드라이버도 재검증한다) */
 static bool scan_request_valid(const struct scan_request *r)
 {
     return  r->step_ddeg > 0u
@@ -1005,41 +242,6 @@ static bool level_gate_ok(struct core *c)
     return true;
 }
 
-/* 팬 이음매(seam) 이중 스캔 경고.
- *
- * 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬을 0~180 "양끝
- * 포함" 으로 돌리면 첫 줄과 마지막 줄이 **같은 수직 평면**을 잡는다:
- *     팬 0   줄 -> 방위 0, 180
- *     팬 180 줄 -> 방위 180, 360(=0)
- * 방위 0 과 180 만 두 번 측정되고 나머지는 한 번씩이라, 그 두 평면의 점은
- * 같은 셀에 몰려 병합된다. 데이터가 틀리진 않지만 스캔 시간을 헛쓰는 것이고
- * 산출물의 병합 통계가 부풀어 원인을 오해하기 쉽다.
- *
- * 팬을 (한 바퀴 - 1스텝) 까지만 돌리면 정확히 0 이 된다. 예) 1도 격자면 0~179.
- * (실측: 0~180 = 중복 180건 / 0~179 = 0건) */
-static void scan_warn_seam(struct core *c, const struct scan_request *r)
-{
-    const int32_t step = (int32_t)r->step_ddeg;
-    int32_t pan_span = (int32_t)r->pan_end_ddeg - (int32_t)r->pan_start_ddeg;
-    if (pan_span < 0) {
-        pan_span += 3600;
-    }
-
-    /* nadir 를 지나는 스윕에서만 방위가 2배로 펼쳐진다 */
-    const bool crosses_nadir = (r->tilt_start_ddeg < 0) && (r->tilt_end_ddeg > 0);
-    const bool seam = crosses_nadir && (step > 0) && ((pan_span * 2) >= 3600);
-
-    if (seam) {
-        core_log(c, "SCAN",
-                 "⚠ 팬 %d..%d 은 양끝이 같은 평면 — 방위 %d/%d 가 두 번 스캔된다. "
-                 "%d 까지만 돌리면 중복 0",
-                 r->pan_start_ddeg, r->pan_end_ddeg,
-                 r->pan_start_ddeg, (r->pan_start_ddeg + 1800) % 3600,
-                 (int)(r->pan_start_ddeg + 1800 - step));
-    }
-}
-
-/* SCAN_START 하달: 수평 게이트 -> 파일 열기 -> ioctl. 실패 시 false */
 static bool core_scan_begin(struct core *c)
 {
     const struct scan_request *r = &c->ctx.req;
@@ -1048,11 +250,12 @@ static bool core_scan_begin(struct core *c)
         core_log(c, "SCAN", "잘못된 스캔 요청 (범위/격자) — 거부");
         return false;
     }
-    scan_warn_seam(c, r);
+    scan_out_warn_seam(r, c);
     if (!level_gate_ok(c)) {
         return false;
     }
-    if (!pc_open(c)) {
+    c->out = scan_out_open(r, c->lidar_offset_mm, c);
+    if (c->out == NULL) {
         return false;
     }
 
@@ -1066,7 +269,7 @@ static bool core_scan_begin(struct core *c)
         ss.step_ddeg       = r->step_ddeg;
         if (ioctl(c->turret_fd, TURRET_SCAN_START, &ss) < 0) {
             core_log(c, "SCAN", "SCAN_START ioctl 실패: %s", strerror(errno));
-            pc_close(c);
+            scan_out_close(&c->out);
             return false;
         }
     } else {
@@ -1074,7 +277,7 @@ static bool core_scan_begin(struct core *c)
     }
 
     memset(&c->ctx.progress, 0, sizeof(c->ctx.progress));
-    c->ctx.progress.expected = scan_expected_points(r);
+    c->ctx.progress.expected = scan_out_expected_points(r);
     memset(&c->ctx.result, 0, sizeof(c->ctx.result));
 
     c->last_point_ms = mono_ms();      /* 무입력 타임아웃 기준 */
@@ -1111,12 +314,13 @@ static void core_drain_scan_points(struct core *c)
         }
         const size_t cnt = (size_t)n / sizeof(batch[0]);
         for (size_t i = 0; i < cnt; ++i) {
-            pc_write_point(c, &batch[i]);
+            scan_out_add(c->out, &batch[i]);
         }
         c->last_point_ms = mono_ms();      /* 무입력 타임아웃 기준 갱신 */
-        c->ctx.progress.points = c->pc_written;
+        c->ctx.progress.points = scan_out_point_count(c->out);
         if (c->ctx.progress.expected > 0u) {
-            const uint64_t pct = (uint64_t)c->pc_written * 100u / c->ctx.progress.expected;
+            const uint64_t pct = (uint64_t)c->ctx.progress.points * 100u
+                               / c->ctx.progress.expected;
             c->ctx.progress.percent = (uint8_t)((pct > 100u) ? 100u : pct);
         }
         if ((size_t)n < sizeof(batch)) {
@@ -1150,11 +354,9 @@ static void core_read_state(struct core *c)
     c->ctx.link.last_err      = st.last_err;
 
     if ((st.flags & STF_HOMED) != 0u) {
-        c->home_valid     = true;
-        c->home_pan_raw   = st.home_pan_encoder_raw;
-        c->home_tilt_raw  = st.home_tilt_encoder_raw;
-        c->home_pan_ddeg  = st.home_pan_ddeg;
-        c->home_tilt_ddeg = st.home_tilt_ddeg;
+        scan_out_set_home(c->out, st.home_pan_encoder_raw,
+                          st.home_tilt_encoder_raw,
+                          st.home_pan_ddeg, st.home_tilt_ddeg);
     }
 
     const uint64_t now = mono_ms();
@@ -1358,9 +560,11 @@ static void core_transition(struct core *c, daemon_state_t want)
             return;
         }
     } else if (want == ST_EXPORT) {
-        pc_close(c);
-        (void)snprintf(c->ctx.result.path, sizeof(c->ctx.result.path), "%s", c->pc_path);
-        c->ctx.result.point_count = c->pc_written;
+        /* 경로·점수를 **닫기 전에** 뽑는다 — close 가 핸들을 해제한다. */
+        (void)snprintf(c->ctx.result.path, sizeof(c->ctx.result.path), "%s",
+                       scan_out_path(c->out));
+        c->ctx.result.point_count = scan_out_point_count(c->out);
+        scan_out_close(&c->out);
         c->ctx.result.valid       = 1u;
         core_log(c, "EXPORT", "%s (%u점) — 카메라 단 전달 대기",
                  c->ctx.result.path, c->ctx.result.point_count);
@@ -1368,7 +572,7 @@ static void core_transition(struct core *c, daemon_state_t want)
         if (c->turret_fd >= 0) {
             (void)ioctl(c->turret_fd, TURRET_DISARM);
         }
-        pc_close(c);                          /* 스캔 중이었으면 파일 마감 */
+        scan_out_close(&c->out);              /* 스캔 중이었으면 파일 마감 */
     }
 
     c->ctx.state = want;
@@ -1542,7 +746,7 @@ static void core_shutdown(struct core *c)
     } else {
         /* turret 미연결(degraded) — 보낼 곳이 없다 */
     }
-    pc_close(c);                              /* 스캔 중이었으면 파일 보존 */
+    scan_out_close(&c->out);                  /* 스캔 중이었으면 파일 보존 */
     for (int i = 0; i < c->n_modules; ++i) {
         const struct daemon_module *m = c->modules[i];
         if (m->deinit != NULL) {
@@ -1588,10 +792,15 @@ static void usage(const char *p)
     (void)fprintf(stderr,
         "사용법:\n"
         "  %s                                   데몬 상주 (MQTT 트리거 대기)\n"
-        "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>] [--once]\n"
+        "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>]\n"
+        "       [--lidar-offset <mm>] [--once]\n"
         "\n"
         "  각도는 **기구각**, 단위 0.1도.  pan %d..%d,  tilt %d..%d,  step 10 = 1.0도\n"
         "  --height 지면→라이다 높이(mm). 좌표엔 안 들어가고 메타데이터로만 실린다.\n"
+        "  --lidar-offset  회전축 교점→라이다 발광면 거리(mm, 기본 %d).\n"
+        "           라이다는 발광면 기준 거리를 주는데 좌표 원점은 축교점이라\n"
+        "           r = 보고거리 + 이 값 으로 보정한다. **좌표에 들어간다.**\n"
+        "           기구를 바꿔 재조립했을 때만 실측해서 넘기면 된다.\n"
         "  --once   스캔 1회 완료(EXPORT)되면 종료.\n"
         "\n"
         "  ⚠ 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
@@ -1600,11 +809,16 @@ static void usage(const char *p)
         "\n"
         "예) 방 전체 3D 스캔 (팬 0~179도, 틸트 -90~+90도, 1도 격자, 높이 2400mm):\n"
         "  %s --scan 0 1790 %d %d 10 --height 2400 --once\n",
-        p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, p, TILT_MIN, TILT_MAX);
+        p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, LIDAR_RANGE_OFFSET_MM,
+        p, TILT_MIN, TILT_MAX);
 }
 
-/* 인자 파싱. 스캔 요청이 있으면 req 를 채우고 true. */
-static bool parse_args(int argc, char **argv, struct scan_request *req, bool *once)
+/* 인자 파싱. 스캔 요청이 있으면 req 를 채우고 true.
+ *
+ * lidar_off 는 req 가 아니라 별도 출력이다 — 스캔 파라미터가 아니라 기구
+ * 상수라서(struct core 주석 참조). 호출자가 미리 기본값을 넣어두고 넘긴다. */
+static bool parse_args(int argc, char **argv, struct scan_request *req,
+                       int32_t *lidar_off, bool *once)
 {
     bool have_scan = false;
     *once = false;
@@ -1620,6 +834,9 @@ static bool parse_args(int argc, char **argv, struct scan_request *req, bool *on
             i += 5;
         } else if ((strcmp(argv[i], "--height") == 0) && ((i + 1) < argc)) {
             req->sensor_height_mm = (int32_t)atoi(argv[i + 1]);
+            i += 1;
+        } else if ((strcmp(argv[i], "--lidar-offset") == 0) && ((i + 1) < argc)) {
+            *lidar_off = (int32_t)atoi(argv[i + 1]);
             i += 1;
         } else if (strcmp(argv[i], "--once") == 0) {
             *once = true;
@@ -1657,7 +874,13 @@ int main(int argc, char **argv)
     struct scan_request cli_req;
     memset(&cli_req, 0, sizeof(cli_req));
     bool once = false;
-    const bool cli_scan = parse_args(argc, argv, &cli_req, &once);
+
+    /* 기구 상수라 CLI 스캔이든 MQTT 스캔이든 항상 적용된다. --lidar-offset 은
+     * 재조립 후 실측값으로 덮어쓰는 용도. */
+    core.lidar_offset_mm = LIDAR_RANGE_OFFSET_MM;
+
+    const bool cli_scan = parse_args(argc, argv, &cli_req,
+                                     &core.lidar_offset_mm, &once);
 
     if (!core_setup(&core)) {
         core_shutdown(&core);
@@ -1668,10 +891,13 @@ int main(int argc, char **argv)
         core.ctx.req       = cli_req;
         core.ctx.req.valid = 1u;         /* 첫 tick 에서 FSM 이 SCANNING 으로 전이 */
         core.exit_after_scan = once;
-        core_log(&core, "CLI", "스캔 요청: pan[%d..%d] tilt[%d..%d] step=%u z=%dmm%s",
+        core_log(&core, "CLI",
+                 "스캔 요청: pan[%d..%d] tilt[%d..%d] step=%u z=%dmm "
+                 "lidar_offset=%dmm%s",
                  cli_req.pan_start_ddeg, cli_req.pan_end_ddeg,
                  cli_req.tilt_start_ddeg, cli_req.tilt_end_ddeg,
                  cli_req.step_ddeg, cli_req.sensor_height_mm,
+                 core.lidar_offset_mm,
                  once ? " (완료 후 종료)" : "");
     }
 

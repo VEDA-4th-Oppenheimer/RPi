@@ -135,7 +135,7 @@ Yocto(meta-raspberrypi)는 `linux-raspberrypi` 레시피로 **커널을 소스�
 
 ### 지금 해둘 것 (Yocto 이관 대비)
 - 커널 모듈 Makefile을 `KDIR ?=` + `obj-m` + `$(MAKE) -C $(KDIR) M=$(PWD)` 형태로 유지 → `module.bbclass`가 그대로 호출 (✅ 현재 충족)
-- `.dts` 오버레이 소스 유지 (✅ `turret-overlay.dts`)
+- `.dts` 오버레이 소스 유지 (✅ `overlays/*-overlay.dts`)
 - `MODULE_LICENSE("GPL")` 명시 (✅)
 - **검증한 커널 버전 기록** → Yocto `PREFERRED_VERSION_linux-raspberrypi`를 그에 맞춰 재현
 - 런타임/빌드 의존성 목록화 → Yocto `DEPENDS`/`IMAGE_INSTALL`로 직행
