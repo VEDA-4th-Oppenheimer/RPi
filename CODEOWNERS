@@ -1,24 +1,38 @@
 # =====================================================================
 # CODEOWNERS — 폴더별 소유자 (PR 리뷰 자동 지정)
-#   ⚠️ 아래 @핸들은 실제 GitHub 사용자명으로 교체할 것.
-#   (송영빈/이영민 핸들 미확인 → TODO 로 표시)
+#
+#   @mainvoid00         이현우
+#   @lkj000619          이광진
+#   @lym0217            이영민
+#   @Ybs0127            송영빈
+#   @kangstudy997-byte  강유근 (QA)
+#
+#   ※ 규칙은 **나중에 나온 것이 이긴다**. 넓은 범위를 먼저, 좁은 범위를 뒤에 둔다.
+#   ※ 소유자는 저장소 쓰기 권한이 있어야 자동 지정된다 (현재 5명 모두 협업자).
 # =====================================================================
 
 # 프로토콜 계약 = 이현우 필수 리뷰 (무단 변경 차단)
 /shared/                     @mainvoid00
 
-# 커널 드라이버 + 데몬 코어 = 이현우
+# 커널 드라이버
 /driver/                     @mainvoid00
-/daemon/core/                @mainvoid00
 
-# 데몬 모듈
-/daemon/modules/tracking/    @mainvoid00            # + @송영빈(TODO 핸들)
-/daemon/modules/meta/        # @이영민(TODO 핸들)
-/daemon/modules/tls/         @lkj000619             # 이광진
+# 데몬 — 기본은 코어 담당, 모듈은 아래에서 개별 지정
+/daemon/                     @mainvoid00
+/daemon/core/                @mainvoid00
+/daemon/modules/mqtt/        @mainvoid00 @lkj000619
+/daemon/modules/imu/         @Ybs0127
+/daemon/modules/led/         @mainvoid00
+
+# MQTT 브로커 설정 · 인증서 발급
+/broker/                     @lkj000619
+
+# 컨테이너 빌드 (리눅스 전용 API 를 macOS 에서 빌드하기 위한 환경)
+/docker/                     @mainvoid00
 
 # 이미지 보정
-/vision/                     # @이영민(TODO 핸들)
+/vision/                     @lym0217
 
-# 정적분석/CI = 강유근 (QA)
+# 정적분석 / CI = 강유근 (QA)
 /tools/                      @kangstudy997-byte
 /.github/                    @kangstudy997-byte
