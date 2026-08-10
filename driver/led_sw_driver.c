@@ -40,11 +40,16 @@
 
 #include "../shared/led_sw.h"
 
-/* 커널 6.15+ 타이머 삭제 함수 이름 변경 호환성 매크로 */
+/* 커널 6.15+ 타이머 함수 이름 변경 호환성 매크로 */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
   #define led_sw_del_timer_sync(t) timer_delete_sync(t)
+  #define led_sw_hrtimer_setup(t, func, clock, mode) hrtimer_setup(t, func, clock, mode)
 #else
   #define led_sw_del_timer_sync(t) del_timer_sync(t)
+  #define led_sw_hrtimer_setup(t, func, clock, mode) do { \
+      hrtimer_init(t, clock, mode); \
+      (t)->function = func; \
+  } while (0)
 #endif
 
 MODULE_LICENSE("GPL");
@@ -449,8 +454,7 @@ static int led_sw_probe(struct platform_device *pdev)
 	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 
 	/* 수동 부저(Passive Buzzer)용 고해상도 타이머 초기화 */
-	hrtimer_init(&g_led_sw->buzzer_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	g_led_sw->buzzer_timer.function = buzzer_hrtimer_callback;
+	led_sw_hrtimer_setup(&g_led_sw->buzzer_timer, buzzer_hrtimer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	/* 2kHz 주파수 (주기 500us -> 반주기 250us = 250,000ns) */
 	g_led_sw->buzzer_period = ktime_set(0, 250000);
 
