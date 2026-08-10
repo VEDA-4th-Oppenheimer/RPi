@@ -17,7 +17,7 @@ static void print_usage(const char *prog)
     (void)fprintf(stderr,
         "Usage: %s [command]\n"
         "Commands:\n"
-        "  led <green:0|1> <yellow:0|1> <red:0|1>  Set all LED states\n"
+        "  led <green:0|1> <yellow:0|1> <red:0|1> <buzzer:0|1> Set all states\n"
         "  state                                    Get current LED and Switch states\n"
         "  monitor                                  Monitor switch press events in real-time\n",
         prog);
@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
 
     if (strcmp(argv[1], "led") == 0) {
         struct led_sw_ctrl ctrl;
-        if (argc < 5) {
+        if (argc < 6) {
             print_usage(argv[0]);
             (void)close(fd);
             return EXIT_FAILURE;
@@ -50,13 +50,14 @@ int main(int argc, char *argv[])
         ctrl.green  = (uint8_t)atoi(argv[2]);
         ctrl.yellow = (uint8_t)atoi(argv[3]);
         ctrl.red    = (uint8_t)atoi(argv[4]);
+        ctrl.buzzer = (uint8_t)atoi(argv[5]);
 
         if (ioctl(fd, LED_SW_SET_LEDS, &ctrl) < 0) {
             (void)fprintf(stderr, "ioctl(LED_SW_SET_LEDS) failed: %s\n", strerror(errno));
             ret = -1;
         } else {
-            (void)printf("LED states updated: Green=%u, Yellow=%u, Red=%u\n",
-                         ctrl.green, ctrl.yellow, ctrl.red);
+            (void)printf("States updated: Green=%u, Yellow=%u, Red=%u, Buzzer=%u\n",
+                         ctrl.green, ctrl.yellow, ctrl.red, ctrl.buzzer);
         }
     } else if (strcmp(argv[1], "state") == 0) {
         struct led_sw_state st;
@@ -69,6 +70,7 @@ int main(int argc, char *argv[])
             (void)printf("  LED Green  : %s\n", st.leds[LED_GREEN] ? "ON" : "OFF");
             (void)printf("  LED Yellow : %s\n", st.leds[LED_YELLOW] ? "ON" : "OFF");
             (void)printf("  LED Red    : %s\n", st.leds[LED_RED] ? "ON" : "OFF");
+            (void)printf("  Buzzer     : %s\n", st.leds[LED_BUZZER] ? "ON" : "OFF");
             (void)printf("  SW ScanStart: %s\n", st.sw[SW_SCAN_START] ? "PRESSED" : "RELEASED");
             (void)printf("  SW EMS      : %s\n", st.sw[SW_EMS] ? "PRESSED" : "RELEASED");
         }
