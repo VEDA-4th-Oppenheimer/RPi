@@ -54,6 +54,7 @@ MODULE_VERSION("1.1");
 static int gpio_green      = 17;
 static int gpio_yellow     = 27;
 static int gpio_red        = 22;
+static int gpio_buzzer     = 26;
 static int gpio_scan_start = 23;
 static int gpio_ems        = 24;
 
@@ -84,6 +85,7 @@ struct led_sw_dev {
 	int pin_led_green;
 	int pin_led_yellow;
 	int pin_led_red;
+	int pin_buzzer;
 	int pin_sw_scan_start;
 	int pin_sw_ems;
 
@@ -167,6 +169,9 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		break;
 	case LED_RED:
 		pin = dev->pin_led_red;
+		break;
+	case LED_BUZZER:
+		pin = dev->pin_buzzer;
 		break;
 	default:
 		return;
@@ -253,9 +258,10 @@ static long led_sw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 
 		mutex_lock(&dev->lock);
-		set_led_hw(dev, LED_GREEN, ctrl.green);
+		set_led_hw(dev, LED_GREEN,  ctrl.green);
 		set_led_hw(dev, LED_YELLOW, ctrl.yellow);
-		set_led_hw(dev, LED_RED, ctrl.red);
+		set_led_hw(dev, LED_RED,    ctrl.red);
+		set_led_hw(dev, LED_BUZZER, ctrl.buzzer);
 		mutex_unlock(&dev->lock);
 		break;
 	}
@@ -279,6 +285,7 @@ static long led_sw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		st.leds[LED_GREEN]  = dev->led_state[LED_GREEN];
 		st.leds[LED_YELLOW] = dev->led_state[LED_YELLOW];
 		st.leds[LED_RED]    = dev->led_state[LED_RED];
+		st.leds[LED_BUZZER] = dev->led_state[LED_BUZZER];
 
 		st.sw[SW_SCAN_START] = dev->sw_state[SW_SCAN_START];
 		st.sw[SW_EMS]        = dev->sw_state[SW_EMS];
@@ -345,6 +352,7 @@ static int led_sw_probe(struct platform_device *pdev)
 	g_led_sw->pin_led_green     = gpio_green;
 	g_led_sw->pin_led_yellow    = gpio_yellow;
 	g_led_sw->pin_led_red       = gpio_red;
+	g_led_sw->pin_buzzer        = gpio_buzzer;
 	g_led_sw->pin_sw_scan_start = gpio_scan_start;
 	g_led_sw->pin_sw_ems        = gpio_ems;
 
@@ -370,6 +378,10 @@ static int led_sw_probe(struct platform_device *pdev)
 		gpio_tmp = of_get_named_gpio(np, "gpios-sw-ems", 0);
 		if (gpio_tmp >= 0)
 			g_led_sw->pin_sw_ems = gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-buzzer", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_buzzer = gpio_tmp;
 	}
 
 	/* GPIO 요청 - LED */
@@ -384,6 +396,10 @@ static int led_sw_probe(struct platform_device *pdev)
 	ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
 	if (ret)
 		pr_warn("led_sw: gpio red (%d) request result: %d\n", g_led_sw->pin_led_red, ret);
+
+	ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
+	if (ret)
+		pr_warn("led_sw: gpio buzzer (%d) request result: %d\n", g_led_sw->pin_buzzer, ret);
 
 	/* GPIO 요청 - Switches */
 	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
@@ -431,11 +447,14 @@ static int led_sw_remove(struct platform_device *pdev)
 		set_led_hw(g_led_sw, LED_GREEN, 0);
 		set_led_hw(g_led_sw, LED_YELLOW, 0);
 		set_led_hw(g_led_sw, LED_RED, 0);
+		set_led_hw(g_led_sw, LED_BUZZER, 0);
 
 		if (gpio_is_valid(g_led_sw->pin_sw_ems))
 			gpio_free(g_led_sw->pin_sw_ems);
 		if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
 			gpio_free(g_led_sw->pin_sw_scan_start);
+		if (gpio_is_valid(g_led_sw->pin_buzzer))
+			gpio_free(g_led_sw->pin_buzzer);
 		if (gpio_is_valid(g_led_sw->pin_led_red))
 			gpio_free(g_led_sw->pin_led_red);
 		if (gpio_is_valid(g_led_sw->pin_led_yellow))

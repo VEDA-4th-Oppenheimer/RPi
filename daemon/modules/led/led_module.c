@@ -30,33 +30,70 @@
 #include <sys/ioctl.h>
 
 static int s_fd = -1;
-static struct led_sw_ctrl s_last_ctrl = {0, 0, 0};
+static struct led_sw_ctrl s_last_ctrl = {0, 0, 0, 0};
 
-static void update_leds(const struct shared_ctx *ctx)
+enum buzzer_seq {
+    BUZ_NONE = 0,
+    BUZ_SCAN_DONE,
+    BUZ_ERROR
+};
+static enum buzzer_seq s_buz_seq = BUZ_NONE;
+static int s_buz_ticks = 0;
+static uint8_t s_last_err = 0; /* 0 = ERR_NONE */
+
+static void update_leds_buzzer(const struct shared_ctx *ctx)
 {
-    struct led_sw_ctrl ctrl = {0, 0, 0};
+    struct led_sw_ctrl ctrl = {0, 0, 0, 0};
 
     if (s_fd < 0) {
         return;
     }
 
-    /* 에러 조건 체크: DISARM 상태, protocol last_err 존재, 또는 링크 단절 */
-    if (ctx->state == ST_DISARM || ctx->link.last_err != ERR_NONE || !ctx->link.link_alive) {
-        ctrl.red = 1u;      /* LED_빨강: 에러(코드) 발생 */
+    /* 1. LED 상태 결정 */
+    if (ctx->state == ST_DISARM || ctx->link.last_err != 0 /* ERR_NONE */ || !ctx->link.link_alive) {
+        ctrl.red = 1u;
     } else if (ctx->state == ST_SCANNING || ctx->state == ST_EXPORT || ctx->link.scanning) {
-        ctrl.green = 1u;    /* LED_초록: 명령코드 중 제어코드 동작 중 */
+        ctrl.green = 1u;
     } else {
-        ctrl.yellow = 1u;   /* LED_노랑: 명령 대기 중 */
+        ctrl.yellow = 1u;
     }
 
-    /* 상태 변화가 있을 때만 ioctl 호출 */
+    /* 2. 부저 시퀀스 로직 (1 tick = 100ms) */
+    if (s_buz_seq == BUZ_SCAN_DONE) {
+        /* 0.5초 1번 = 5 ticks ON */
+        if (s_buz_ticks < 5) {
+            ctrl.buzzer = 1u;
+            s_buz_ticks++;
+        } else {
+            ctrl.buzzer = 0u;
+            s_buz_seq = BUZ_NONE;
+        }
+    } else if (s_buz_seq == BUZ_ERROR) {
+        /* 0.2초 간격 2번 짧게 = 2 ticks ON, 2 ticks OFF, 2 ticks ON */
+        if (s_buz_ticks < 2) {
+            ctrl.buzzer = 1u;
+        } else if (s_buz_ticks < 4) {
+            ctrl.buzzer = 0u;
+        } else if (s_buz_ticks < 6) {
+            ctrl.buzzer = 1u;
+        } else {
+            ctrl.buzzer = 0u;
+            s_buz_seq = BUZ_NONE;
+        }
+        
+        if (s_buz_seq != BUZ_NONE) {
+            s_buz_ticks++;
+        }
+    }
+
+    /* 3. 상태 변화 시에만 ioctl 호출 */
     if (ctrl.green != s_last_ctrl.green ||
         ctrl.yellow != s_last_ctrl.yellow ||
-        ctrl.red != s_last_ctrl.red) {
+        ctrl.red != s_last_ctrl.red ||
+        ctrl.buzzer != s_last_ctrl.buzzer) {
 
         if (ioctl(s_fd, LED_SW_SET_LEDS, &ctrl) < 0) {
-            (void)fprintf(stderr, "[led     ] ioctl(LED_SW_SET_LEDS) failed: %s\n",
-                          strerror(errno));
+            (void)fprintf(stderr, "[led     ] ioctl(LED_SW_SET_LEDS) failed: %s\n", strerror(errno));
         } else {
             s_last_ctrl = ctrl;
         }
@@ -80,6 +117,7 @@ static int led_init(struct shared_ctx *ctx)
     s_last_ctrl.green  = 0;
     s_last_ctrl.yellow = 1;
     s_last_ctrl.red    = 0;
+    s_last_ctrl.buzzer = 0;
     (void)ioctl(s_fd, LED_SW_SET_LEDS, &s_last_ctrl);
 
     return 0;
@@ -127,7 +165,15 @@ static void led_on_event(struct shared_ctx *ctx)
 static void led_on_tick(struct shared_ctx *ctx, daemon_state_t state)
 {
     (void)state;
-    update_leds(ctx);
+
+    /* CMD_ERROR 엣지 검출 */
+    if (ctx->link.last_err != 0 && ctx->link.last_err != s_last_err) {
+        s_buz_seq = BUZ_ERROR;
+        s_buz_ticks = 0;
+    }
+    s_last_err = ctx->link.last_err;
+
+    update_leds_buzzer(ctx);
 }
 
 /* cppcheck-suppress constParameterCallback ; 콜백 ABI 고정 */
@@ -135,15 +181,21 @@ static void led_on_state(struct shared_ctx *ctx,
                          daemon_state_t old_st, daemon_state_t new_st)
 {
     (void)old_st;
-    (void)new_st;
-    update_leds(ctx);
+
+    /* SCAN_DONE (ST_EXPORT 진입) 감지 */
+    if (new_st == ST_EXPORT) {
+        s_buz_seq = BUZ_SCAN_DONE;
+        s_buz_ticks = 0;
+    }
+
+    update_leds_buzzer(ctx);
 }
 
 static void led_deinit(struct shared_ctx *ctx)
 {
     (void)ctx;
     if (s_fd >= 0) {
-        struct led_sw_ctrl off = {0, 0, 0};
+        struct led_sw_ctrl off = {0, 0, 0, 0};
         (void)ioctl(s_fd, LED_SW_SET_LEDS, &off);
         (void)close(s_fd);
         s_fd = -1;

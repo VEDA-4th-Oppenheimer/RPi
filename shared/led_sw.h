@@ -53,6 +53,7 @@ struct led_sw_ctrl {
     led_sw_u8 green;   /* 1 = ON, 0 = OFF */
     led_sw_u8 yellow;  /* 1 = ON, 0 = OFF */
     led_sw_u8 red;     /* 1 = ON, 0 = OFF */
+    led_sw_u8 buzzer;
 };
 
 /* 상태 조회 구조체 (ioctl LED_SW_GET_STATE) */
