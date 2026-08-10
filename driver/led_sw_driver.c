@@ -35,6 +35,8 @@
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/version.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 
 #include "../shared/led_sw.h"
 
@@ -91,6 +93,11 @@ struct led_sw_dev {
 
 	/* 폴링 타이머 (인터럽트 대체) */
 	struct timer_list poll_timer;
+
+	/* 수동 부저(Passive Buzzer)용 고해상도 타이머 (소프트웨어 PWM) */
+	struct hrtimer buzzer_timer;
+	ktime_t buzzer_period;
+	int buzzer_toggle;
 
 	/* LED 및 스위치 상태 캐시 */
 	u8 led_state[LED_MAX];
@@ -153,7 +160,25 @@ static void sw_poll_timer_handler(struct timer_list *t)
 }
 
 /* ---------------------------------------------------------------------------
- *  LED 출력 제어 헬퍼
+ *  수동 부저(Passive Buzzer) PWM 생성기 (hrtimer)
+ * ------------------------------------------------------------------------- */
+static enum hrtimer_restart buzzer_hrtimer_callback(struct hrtimer *timer)
+{
+	struct led_sw_dev *dev = container_of(timer, struct led_sw_dev, buzzer_timer);
+
+	if (dev->led_state[LED_BUZZER]) {
+		dev->buzzer_toggle = !dev->buzzer_toggle;
+		gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
+		hrtimer_forward_now(timer, dev->buzzer_period);
+		return HRTIMER_RESTART;
+	}
+
+	gpio_set_value(dev->pin_buzzer, 0);
+	return HRTIMER_NORESTART;
+}
+
+/* ---------------------------------------------------------------------------
+ *  하드웨어 제어 유틸리티
  * ------------------------------------------------------------------------- */
 static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 {
@@ -171,8 +196,17 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		pin = dev->pin_led_red;
 		break;
 	case LED_BUZZER:
-		pin = dev->pin_buzzer;
-		break;
+		if (on != dev->led_state[LED_BUZZER]) {
+			dev->led_state[LED_BUZZER] = on;
+			if (on) {
+				dev->buzzer_toggle = 0;
+				hrtimer_start(&dev->buzzer_timer, dev->buzzer_period, HRTIMER_MODE_REL);
+			} else {
+				hrtimer_cancel(&dev->buzzer_timer);
+				gpio_set_value(dev->pin_buzzer, 0);
+			}
+		}
+		return; /* 부저는 hrtimer로 처리하므로 일반 GPIO 로직 스킵 */
 	default:
 		return;
 	}
@@ -414,6 +448,12 @@ static int led_sw_probe(struct platform_device *pdev)
 	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
 	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 
+	/* 수동 부저(Passive Buzzer)용 고해상도 타이머 초기화 */
+	hrtimer_init(&g_led_sw->buzzer_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	g_led_sw->buzzer_timer.function = buzzer_hrtimer_callback;
+	/* 2kHz 주파수 (주기 500us -> 반주기 250us = 250,000ns) */
+	g_led_sw->buzzer_period = ktime_set(0, 250000);
+
 	/* misc device 등록 (/dev/led_sw) */
 	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
 	g_led_sw->misc.name     = LED_SW_DEV_NAME;
@@ -443,11 +483,13 @@ static int led_sw_remove(struct platform_device *pdev)
 
 		led_sw_del_timer_sync(&g_led_sw->poll_timer);
 
-		/* LED 소등 후 해제 */
+		/* LED 및 부저 소등 후 해제 (내부에서 hrtimer_cancel 호출됨) */
 		set_led_hw(g_led_sw, LED_GREEN, 0);
 		set_led_hw(g_led_sw, LED_YELLOW, 0);
 		set_led_hw(g_led_sw, LED_RED, 0);
 		set_led_hw(g_led_sw, LED_BUZZER, 0);
+
+		hrtimer_cancel(&g_led_sw->buzzer_timer);
 
 		if (gpio_is_valid(g_led_sw->pin_sw_ems))
 			gpio_free(g_led_sw->pin_sw_ems);
