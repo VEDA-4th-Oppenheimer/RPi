@@ -20,16 +20,31 @@
 	compatible = "brcm,bcm2835";
 
 	fragment@0 {
+		target = <&gpio>;
+		__overlay__ {
+			led_sw_pins: led_sw_pins {
+				/* 17: Green, 27: Yellow, 22: Red, 23: Scan Start, 24: EMS */
+				brcm,pins = <17 27 22 23 24>;
+				brcm,function = <1 1 1 0 0>; /* 1: Output, 0: Input */
+				brcm,pull = <0 0 0 2 2>;     /* 0: None, 2: Pull-Up */
+			};
+		};
+	};
+
+	fragment@1 {
 		target-path = "/";
 		__overlay__ {
 			led_sw {
 				compatible = "adts,led-sw";
 				status = "okay";
 
-				gpios-led-green      = <&gpio 17 0>; /* GPIO_ACTIVE_HIGH */
+				pinctrl-names = "default";
+				pinctrl-0 = <&led_sw_pins>;
+
+				gpios-led-green      = <&gpio 17 0>;
 				gpios-led-yellow     = <&gpio 27 0>;
 				gpios-led-red        = <&gpio 22 0>;
-				gpios-sw-scan-start  = <&gpio 23 1>; /* GPIO_ACTIVE_LOW */
+				gpios-sw-scan-start  = <&gpio 23 1>;
 				gpios-sw-ems         = <&gpio 24 1>;
 			};
 		};
