@@ -32,8 +32,16 @@
 #include <linux/wait.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+#include <linux/version.h>
 
 #include "../shared/led_sw.h"
+
+/* 커널 6.15+ 타이머 삭제 함수 이름 변경 호환성 매크로 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+  #define led_sw_del_timer_sync(t) timer_delete_sync(t)
+#else
+  #define led_sw_del_timer_sync(t) del_timer_sync(t)
+#endif
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("VEDA Oppenheimer Team");
@@ -100,7 +108,7 @@ static struct led_sw_dev *g_led_sw = NULL;
  * ------------------------------------------------------------------------- */
 static void scan_start_timer_handler(struct timer_list *t)
 {
-	struct led_sw_dev *dev = from_timer(dev, t, timer_scan_start);
+	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_scan_start);
 	int val = gpio_get_value(dev->pin_sw_scan_start);
 	u8 pressed = (val == 0) ? 1 : 0; /* Active Low */
 
@@ -122,7 +130,7 @@ static void scan_start_timer_handler(struct timer_list *t)
 
 static void ems_timer_handler(struct timer_list *t)
 {
-	struct led_sw_dev *dev = from_timer(dev, t, timer_ems);
+	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_ems);
 	int val = gpio_get_value(dev->pin_sw_ems);
 	u8 pressed = (val == 0) ? 1 : 0; /* Active Low */
 
@@ -310,15 +318,6 @@ static struct file_operations led_sw_fops = {
 	.llseek         = noop_llseek,
 };
 
-/* devtmpfs 0666 노드 권한 설정 */
-static char *led_sw_devnode(const struct device *dev, umode_t *mode)
-{
-	(void)dev;
-	if (mode)
-		*mode = 0666;
-	return NULL;
-}
-
 /* ---------------------------------------------------------------------------
  *  Init & Exit
  * ------------------------------------------------------------------------- */
@@ -408,8 +407,8 @@ err_irqs:
 		free_irq(g_led_sw->irq_ems, g_led_sw);
 	if (g_led_sw->irq_scan_start >= 0)
 		free_irq(g_led_sw->irq_scan_start, g_led_sw);
-	del_timer_sync(&g_led_sw->timer_ems);
-	del_timer_sync(&g_led_sw->timer_scan_start);
+	led_sw_del_timer_sync(&g_led_sw->timer_ems);
+	led_sw_del_timer_sync(&g_led_sw->timer_scan_start);
 	gpio_free(g_led_sw->pin_sw_ems);
 err_sw_start:
 	gpio_free(g_led_sw->pin_sw_scan_start);
@@ -434,8 +433,8 @@ static void __exit led_sw_exit(void)
 	if (g_led_sw->irq_scan_start >= 0)
 		free_irq(g_led_sw->irq_scan_start, g_led_sw);
 
-	del_timer_sync(&g_led_sw->timer_ems);
-	del_timer_sync(&g_led_sw->timer_scan_start);
+	led_sw_del_timer_sync(&g_led_sw->timer_ems);
+	led_sw_del_timer_sync(&g_led_sw->timer_scan_start);
 
 	/* LED 소등 후 해제 */
 	set_led_hw(g_led_sw, LED_GREEN, 0);
