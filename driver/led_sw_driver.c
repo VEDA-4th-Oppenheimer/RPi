@@ -425,29 +425,41 @@ static int led_sw_probe(struct platform_device *pdev)
 
 	/* GPIO 요청 - LED */
 	ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
-	if (ret)
-		pr_warn("led_sw: gpio green (%d) request result: %d\n", g_led_sw->pin_led_green, ret);
+	if (ret) {
+		pr_err("led_sw: gpio green (%d) request failed: %d\n", g_led_sw->pin_led_green, ret);
+		return ret;
+	}
 
 	ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow");
-	if (ret)
-		pr_warn("led_sw: gpio yellow (%d) request result: %d\n", g_led_sw->pin_led_yellow, ret);
+	if (ret) {
+		pr_err("led_sw: gpio yellow (%d) request failed: %d\n", g_led_sw->pin_led_yellow, ret);
+		return ret;
+	}
 
 	ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
-	if (ret)
-		pr_warn("led_sw: gpio red (%d) request result: %d\n", g_led_sw->pin_led_red, ret);
+	if (ret) {
+		pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red, ret);
+		return ret;
+	}
 
 	ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
-	if (ret)
-		pr_warn("led_sw: gpio buzzer (%d) request result: %d\n", g_led_sw->pin_buzzer, ret);
+	if (ret) {
+		pr_err("led_sw: gpio buzzer (%d) request failed: %d\n", g_led_sw->pin_buzzer, ret);
+		return ret;
+	}
 
 	/* GPIO 요청 - Switches */
 	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
-	if (ret)
-		pr_warn("led_sw: gpio scan_start (%d) request result: %d\n", g_led_sw->pin_sw_scan_start, ret);
+	if (ret) {
+		pr_err("led_sw: gpio scan_start (%d) request failed: %d\n", g_led_sw->pin_sw_scan_start, ret);
+		return ret;
+	}
 
 	ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
-	if (ret)
-		pr_warn("led_sw: gpio ems (%d) request result: %d\n", g_led_sw->pin_sw_ems, ret);
+	if (ret) {
+		pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems, ret);
+		return ret;
+	}
 
 	/* 폴링 타이머 초기화 및 시작 (50ms) */
 	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
