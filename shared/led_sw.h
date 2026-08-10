@@ -31,7 +31,8 @@ enum led_channel {
     LED_GREEN  = 0,   /* 명령코드 중 제어코드 동작 중 */
     LED_YELLOW = 1,   /* 명령 대기 중                 */
     LED_RED    = 2,   /* 에러(코드) 발생              */
-    LED_MAX    = 3
+    LED_BUZZER = 3,   /* 부저 제어                    */
+    LED_MAX    = 4
 };
 
 /* 스위치 ID */
