@@ -117,17 +117,15 @@ static void scan_start_timer_handler(struct timer_list *t)
 
 	if (pressed != dev->sw_state[SW_SCAN_START]) {
 		dev->sw_state[SW_SCAN_START] = pressed;
-		if (pressed) {
-			struct led_sw_event evt;
+		
+		struct led_sw_event evt;
+		evt.sw_id = SW_SCAN_START;
+		evt.state = pressed;
+		evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
-			evt.sw_id = SW_SCAN_START;
-			evt.state = 1;
-			evt.timestamp_ms = jiffies_to_msecs(jiffies);
-
-			if (kfifo_put(&dev->fifo, evt))
-				wake_up_interruptible(&dev->wq);
-			pr_info("led_sw: SW_SCAN_START pressed\n");
-		}
+		if (kfifo_put(&dev->fifo, evt))
+			wake_up_interruptible(&dev->wq);
+		pr_info("led_sw: SW_SCAN_START %s\n", pressed ? "pressed" : "released");
 	}
 }
 
@@ -139,17 +137,15 @@ static void ems_timer_handler(struct timer_list *t)
 
 	if (pressed != dev->sw_state[SW_EMS]) {
 		dev->sw_state[SW_EMS] = pressed;
-		if (pressed) {
-			struct led_sw_event evt;
 
-			evt.sw_id = SW_EMS;
-			evt.state = 1;
-			evt.timestamp_ms = jiffies_to_msecs(jiffies);
+		struct led_sw_event evt;
+		evt.sw_id = SW_EMS;
+		evt.state = pressed;
+		evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
-			if (kfifo_put(&dev->fifo, evt))
-				wake_up_interruptible(&dev->wq);
-			pr_info("led_sw: SW_EMS pressed\n");
-		}
+		if (kfifo_put(&dev->fifo, evt))
+			wake_up_interruptible(&dev->wq);
+		pr_info("led_sw: SW_EMS %s\n", pressed ? "pressed" : "released");
 	}
 }
 
@@ -425,7 +421,7 @@ static int led_sw_probe(struct platform_device *pdev)
 		g_led_sw->irq_scan_start = gpio_to_irq(g_led_sw->pin_sw_scan_start);
 		if (g_led_sw->irq_scan_start >= 0) {
 			ret = request_irq(g_led_sw->irq_scan_start, scan_start_irq_handler,
-					  IRQF_TRIGGER_FALLING, "sw_scan_start_irq", g_led_sw);
+					  IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING, "sw_scan_start_irq", g_led_sw);
 			if (ret)
 				pr_warn("led_sw: request_irq scan_start failed: %d\n", ret);
 		}
@@ -437,7 +433,7 @@ static int led_sw_probe(struct platform_device *pdev)
 		g_led_sw->irq_ems = gpio_to_irq(g_led_sw->pin_sw_ems);
 		if (g_led_sw->irq_ems >= 0) {
 			ret = request_irq(g_led_sw->irq_ems, ems_irq_handler,
-					  IRQF_TRIGGER_FALLING, "sw_ems_irq", g_led_sw);
+					  IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING, "sw_ems_irq", g_led_sw);
 			if (ret)
 				pr_warn("led_sw: request_irq ems failed: %d\n", ret);
 		}
