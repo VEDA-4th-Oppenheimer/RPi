@@ -166,11 +166,11 @@ static int buzzer_kthread_func(void *data)
 	struct led_sw_dev *dev = data;
 
 	while (!kthread_should_stop()) {
-		if (dev->led_state[LED_BUZZER]) {
+		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
-			/* 4kHz 공진 주파수 (주기 250us -> 반주기 125us) */
-			usleep_range(125, 130);
+			/* 4kHz 공진 주파수 (반주기 125us). 스케줄러 오차 방지를 위해 udelay(바쁜 대기) 사용 */
+			udelay(125);
 		} else {
 			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
 			msleep(20);
@@ -199,7 +199,7 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		break;
 	case LED_BUZZER:
 		if (on != dev->led_state[LED_BUZZER]) {
-			dev->led_state[LED_BUZZER] = on;
+			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
 			if (!on) {
 				gpio_set_value(dev->pin_buzzer, 0);
 			}
