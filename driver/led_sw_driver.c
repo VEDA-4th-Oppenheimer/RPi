@@ -87,14 +87,8 @@ struct led_sw_dev {
 	int pin_sw_scan_start;
 	int pin_sw_ems;
 
-	/* IRQ 번호 */
-	int irq_scan_start;
-	int irq_ems;
-
-	/* 디바운스 타이머 */
-	struct timer_list timer_scan_start;
-	struct timer_list timer_ems;
-	struct timer_list timer_debug;
+	/* 폴링 타이머 (인터럽트 대체) */
+	struct timer_list poll_timer;
 
 	/* LED 및 스위치 상태 캐시 */
 	u8 led_state[LED_MAX];
@@ -110,79 +104,50 @@ static struct platform_device *g_plat_dev = NULL;
 /* ---------------------------------------------------------------------------
  *  스위치 디바운스 타이머 콜백
  * ------------------------------------------------------------------------- */
-static void scan_start_timer_handler(struct timer_list *t)
+/* ---------------------------------------------------------------------------
+ *  스위치 폴링 타이머 (50ms 주기로 상태 확인)
+ * ------------------------------------------------------------------------- */
+static void sw_poll_timer_handler(struct timer_list *t)
 {
-	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_scan_start);
-	int val = gpio_get_value(dev->pin_sw_scan_start);
-	u8 pressed = (val == 0) ? 1 : 0; /* Active Low */
+	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
+	int val_scan = 1, val_ems = 1;
+	u8 pressed_scan = 0, pressed_ems = 0;
 
-	if (pressed != dev->sw_state[SW_SCAN_START]) {
-		dev->sw_state[SW_SCAN_START] = pressed;
-		
+	if (gpio_is_valid(dev->pin_sw_scan_start)) {
+		val_scan = gpio_get_value(dev->pin_sw_scan_start);
+		pressed_scan = (val_scan == 0) ? 1 : 0;
+	}
+	
+	if (gpio_is_valid(dev->pin_sw_ems)) {
+		val_ems = gpio_get_value(dev->pin_sw_ems);
+		pressed_ems = (val_ems == 0) ? 1 : 0;
+	}
+
+	if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
+		dev->sw_state[SW_SCAN_START] = pressed_scan;
 		struct led_sw_event evt;
 		evt.sw_id = SW_SCAN_START;
-		evt.state = pressed;
+		evt.state = pressed_scan;
 		evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
 		if (kfifo_put(&dev->fifo, evt))
 			wake_up_interruptible(&dev->wq);
-		pr_info("led_sw: SW_SCAN_START %s\n", pressed ? "pressed" : "released");
+		pr_info("led_sw: SW_SCAN_START %s\n", pressed_scan ? "pressed" : "released");
 	}
-}
 
-static void ems_timer_handler(struct timer_list *t)
-{
-	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_ems);
-	int val = gpio_get_value(dev->pin_sw_ems);
-	u8 pressed = (val == 0) ? 1 : 0; /* Active Low */
-
-	if (pressed != dev->sw_state[SW_EMS]) {
-		dev->sw_state[SW_EMS] = pressed;
-
+	if (pressed_ems != dev->sw_state[SW_EMS]) {
+		dev->sw_state[SW_EMS] = pressed_ems;
 		struct led_sw_event evt;
 		evt.sw_id = SW_EMS;
-		evt.state = pressed;
+		evt.state = pressed_ems;
 		evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
 		if (kfifo_put(&dev->fifo, evt))
 			wake_up_interruptible(&dev->wq);
-		pr_info("led_sw: SW_EMS %s\n", pressed ? "pressed" : "released");
+		pr_info("led_sw: SW_EMS %s\n", pressed_ems ? "pressed" : "released");
 	}
-}
 
-static void debug_timer_handler(struct timer_list *t)
-{
-	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_debug);
-	int scan = -1, ems = -1;
-
-	if (gpio_is_valid(dev->pin_sw_scan_start))
-		scan = gpio_get_value(dev->pin_sw_scan_start);
-	if (gpio_is_valid(dev->pin_sw_ems))
-		ems = gpio_get_value(dev->pin_sw_ems);
-
-	pr_info("led_sw: [DEBUG POLL] SCAN_START(pin %d) = %d, EMS(pin %d) = %d\n",
-		dev->pin_sw_scan_start, scan, dev->pin_sw_ems, ems);
-
-	mod_timer(&dev->timer_debug, jiffies + msecs_to_jiffies(1000));
-}
-
-/* ---------------------------------------------------------------------------
- *  스위치 IRQ 핸들러
- * ------------------------------------------------------------------------- */
-static irqreturn_t scan_start_irq_handler(int irq, void *dev_id)
-{
-	struct led_sw_dev *dev = (struct led_sw_dev *)dev_id;
-	(void)irq;
-	mod_timer(&dev->timer_scan_start, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
-	return IRQ_HANDLED;
-}
-
-static irqreturn_t ems_irq_handler(int irq, void *dev_id)
-{
-	struct led_sw_dev *dev = (struct led_sw_dev *)dev_id;
-	(void)irq;
-	mod_timer(&dev->timer_ems, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
-	return IRQ_HANDLED;
+	mod_timer(&dev->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 }
 
 /* ---------------------------------------------------------------------------
@@ -429,38 +394,9 @@ static int led_sw_probe(struct platform_device *pdev)
 	if (ret)
 		pr_warn("led_sw: gpio ems (%d) request result: %d\n", g_led_sw->pin_sw_ems, ret);
 
-	/* 타이머 초기화 */
-	timer_setup(&g_led_sw->timer_scan_start, scan_start_timer_handler, 0);
-	timer_setup(&g_led_sw->timer_ems, ems_timer_handler, 0);
-
-	/* 디버그용 1초 타이머 (이슈 해결될 때까지만 임시 사용) */
-	timer_setup(&g_led_sw->timer_debug, debug_timer_handler, 0);
-	mod_timer(&g_led_sw->timer_debug, jiffies + msecs_to_jiffies(1000));
-
-	/* IRQ 등록 */
-	if (gpio_is_valid(g_led_sw->pin_sw_scan_start)) {
-		g_led_sw->irq_scan_start = gpio_to_irq(g_led_sw->pin_sw_scan_start);
-		if (g_led_sw->irq_scan_start >= 0) {
-			ret = request_irq(g_led_sw->irq_scan_start, scan_start_irq_handler,
-					  IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING, "sw_scan_start_irq", g_led_sw);
-			if (ret)
-				pr_warn("led_sw: request_irq scan_start failed: %d\n", ret);
-		}
-	} else {
-		g_led_sw->irq_scan_start = -1;
-	}
-
-	if (gpio_is_valid(g_led_sw->pin_sw_ems)) {
-		g_led_sw->irq_ems = gpio_to_irq(g_led_sw->pin_sw_ems);
-		if (g_led_sw->irq_ems >= 0) {
-			ret = request_irq(g_led_sw->irq_ems, ems_irq_handler,
-					  IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING, "sw_ems_irq", g_led_sw);
-			if (ret)
-				pr_warn("led_sw: request_irq ems failed: %d\n", ret);
-		}
-	} else {
-		g_led_sw->irq_ems = -1;
-	}
+	/* 폴링 타이머 초기화 및 시작 (50ms) */
+	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
+	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 
 	/* misc device 등록 (/dev/led_sw) */
 	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
@@ -489,14 +425,7 @@ static int led_sw_remove(struct platform_device *pdev)
 	if (g_led_sw) {
 		misc_deregister(&g_led_sw->misc);
 
-		if (g_led_sw->irq_ems >= 0)
-			free_irq(g_led_sw->irq_ems, g_led_sw);
-		if (g_led_sw->irq_scan_start >= 0)
-			free_irq(g_led_sw->irq_scan_start, g_led_sw);
-
-		led_sw_del_timer_sync(&g_led_sw->timer_ems);
-		led_sw_del_timer_sync(&g_led_sw->timer_scan_start);
-		led_sw_del_timer_sync(&g_led_sw->timer_debug);
+		led_sw_del_timer_sync(&g_led_sw->poll_timer);
 
 		/* LED 소등 후 해제 */
 		set_led_hw(g_led_sw, LED_GREEN, 0);
