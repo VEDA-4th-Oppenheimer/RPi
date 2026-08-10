@@ -94,6 +94,7 @@ struct led_sw_dev {
 	/* 디바운스 타이머 */
 	struct timer_list timer_scan_start;
 	struct timer_list timer_ems;
+	struct timer_list timer_debug;
 
 	/* LED 및 스위치 상태 캐시 */
 	u8 led_state[LED_MAX];
@@ -147,6 +148,22 @@ static void ems_timer_handler(struct timer_list *t)
 			wake_up_interruptible(&dev->wq);
 		pr_info("led_sw: SW_EMS %s\n", pressed ? "pressed" : "released");
 	}
+}
+
+static void debug_timer_handler(struct timer_list *t)
+{
+	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, timer_debug);
+	int scan = -1, ems = -1;
+
+	if (gpio_is_valid(dev->pin_sw_scan_start))
+		scan = gpio_get_value(dev->pin_sw_scan_start);
+	if (gpio_is_valid(dev->pin_sw_ems))
+		ems = gpio_get_value(dev->pin_sw_ems);
+
+	pr_info("led_sw: [DEBUG POLL] SCAN_START(pin %d) = %d, EMS(pin %d) = %d\n",
+		dev->pin_sw_scan_start, scan, dev->pin_sw_ems, ems);
+
+	mod_timer(&dev->timer_debug, jiffies + msecs_to_jiffies(1000));
 }
 
 /* ---------------------------------------------------------------------------
@@ -416,6 +433,10 @@ static int led_sw_probe(struct platform_device *pdev)
 	timer_setup(&g_led_sw->timer_scan_start, scan_start_timer_handler, 0);
 	timer_setup(&g_led_sw->timer_ems, ems_timer_handler, 0);
 
+	/* 디버그용 1초 타이머 (이슈 해결될 때까지만 임시 사용) */
+	timer_setup(&g_led_sw->timer_debug, debug_timer_handler, 0);
+	mod_timer(&g_led_sw->timer_debug, jiffies + msecs_to_jiffies(1000));
+
 	/* IRQ 등록 */
 	if (gpio_is_valid(g_led_sw->pin_sw_scan_start)) {
 		g_led_sw->irq_scan_start = gpio_to_irq(g_led_sw->pin_sw_scan_start);
@@ -475,6 +496,7 @@ static int led_sw_remove(struct platform_device *pdev)
 
 		led_sw_del_timer_sync(&g_led_sw->timer_ems);
 		led_sw_del_timer_sync(&g_led_sw->timer_scan_start);
+		led_sw_del_timer_sync(&g_led_sw->timer_debug);
 
 		/* LED 소등 후 해제 */
 		set_led_hw(g_led_sw, LED_GREEN, 0);
