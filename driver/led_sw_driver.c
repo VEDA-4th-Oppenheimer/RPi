@@ -164,16 +164,23 @@ static void sw_poll_timer_handler(struct timer_list *t)
 static int buzzer_kthread_func(void *data)
 {
 	struct led_sw_dev *dev = data;
+	unsigned long last_print = jiffies;
 
 	while (!kthread_should_stop()) {
 		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
-			/* 4kHz 공진 주파수 (반주기 125us). 스케줄러 오차 방지를 위해 udelay(바쁜 대기) 사용 */
-			udelay(125);
+			
+			if (time_after(jiffies, last_print + HZ)) {
+				pr_info("led_sw: buzzer is active, toggling pin %d\n", dev->pin_buzzer);
+				last_print = jiffies;
+			}
+			/* 2kHz 주파수 (반주기 250us). udelay(바쁜 대기) 사용 */
+			udelay(250);
 		} else {
 			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
 			msleep(20);
+			last_print = jiffies;
 		}
 	}
 	return 0;
