@@ -455,8 +455,8 @@ static int led_sw_probe(struct platform_device *pdev)
 
 	/* 수동 부저(Passive Buzzer)용 고해상도 타이머 초기화 */
 	led_sw_hrtimer_setup(&g_led_sw->buzzer_timer, buzzer_hrtimer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	/* 2kHz 주파수 (주기 500us -> 반주기 250us = 250,000ns) */
-	g_led_sw->buzzer_period = ktime_set(0, 250000);
+	/* 4kHz 공진 주파수 (주기 250us -> 반주기 125us = 125,000ns) */
+	g_led_sw->buzzer_period = ktime_set(0, 125000);
 
 	/* misc device 등록 (/dev/led_sw) */
 	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
