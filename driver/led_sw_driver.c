@@ -175,8 +175,8 @@ static int buzzer_kthread_func(void *data)
 				pr_info("led_sw: buzzer is active, toggling pin %d\n", dev->pin_buzzer);
 				last_print = jiffies;
 			}
-			/* 2kHz 주파수 (반주기 250us). udelay(바쁜 대기) 사용 */
-			udelay(250);
+			/* 약 400Hz 주파수 (반주기 1.25ms). CPU 양보를 위해 usleep_range 사용 */
+			usleep_range(1200, 1300);
 		} else {
 			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
 			msleep(20);
