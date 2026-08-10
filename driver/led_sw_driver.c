@@ -11,6 +11,7 @@
  *    - 스위치_ems        : 즉시 정지 CMD_DISARM         (GPIO 24 기본값, IRQ)
  *
  *  기능:
+ *    - Platform Driver + DeviceTree (adts,led-sw) 매칭 및 수동 insmod 폴백 지원
  *    - ioctl() 로 LED 개별/일괄 제어 및 현재 상태 조회
  *    - Interrupt + Timer Debounce 기반 스위치 입력 감지
  *    - kfifo + poll() + read() 로 스위치 눌림 이벤트를 유저 데몬에 비동기 전달
@@ -32,6 +33,7 @@
 #include <linux/wait.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+#include <linux/platform_device.h>
 #include <linux/version.h>
 
 #include "../shared/led_sw.h"
@@ -46,7 +48,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("VEDA Oppenheimer Team");
 MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
 static int gpio_green      = 17;
@@ -102,6 +104,7 @@ struct led_sw_dev {
 };
 
 static struct led_sw_dev *g_led_sw = NULL;
+static struct platform_device *g_plat_dev = NULL;
 
 /* ---------------------------------------------------------------------------
  *  스위치 디바운스 타이머 콜백
@@ -217,6 +220,9 @@ static ssize_t led_sw_read(struct file *file, char __user *buf, size_t count, lo
 	if (count < sizeof(struct led_sw_event))
 		return -EINVAL;
 
+	if (!dev)
+		return -ENODEV;
+
 	if (kfifo_is_empty(&dev->fifo)) {
 		int ret;
 
@@ -242,6 +248,9 @@ static __poll_t led_sw_poll(struct file *file, poll_table *wait)
 	struct led_sw_dev *dev = file->private_data;
 	__poll_t mask = 0;
 
+	if (!dev)
+		return EPOLLERR;
+
 	poll_wait(file, &dev->wq, wait);
 
 	if (!kfifo_is_empty(&dev->fifo))
@@ -252,7 +261,6 @@ static __poll_t led_sw_poll(struct file *file, poll_table *wait)
 
 /* cppcheck-suppress constParameterCallback ; file_operations unlocked_ioctl 콜백 ABI */
 static long led_sw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-
 {
 	struct led_sw_dev *dev = file->private_data;
 
@@ -319,13 +327,35 @@ static struct file_operations led_sw_fops = {
 };
 
 /* ---------------------------------------------------------------------------
- *  Init & Exit
+ *  GPIO 요청 헬퍼 (재시도 및 에러 처리)
  * ------------------------------------------------------------------------- */
-static int __init led_sw_init(void)
+static int request_gpio_safe(int pin, unsigned long flags, const char *label)
 {
 	int ret;
 
-	g_led_sw = kzalloc(sizeof(*g_led_sw), GFP_KERNEL);
+	if (!gpio_is_valid(pin))
+		return -EINVAL;
+
+	ret = gpio_request_one(pin, flags, label);
+	if (ret == -EBUSY || ret == -EPROBE_DEFER) {
+		gpio_free(pin);
+		ret = gpio_request_one(pin, flags, label);
+	}
+	return ret;
+}
+
+/* ---------------------------------------------------------------------------
+ *  Platform Probe & Remove
+ * ------------------------------------------------------------------------- */
+static int led_sw_probe(struct platform_device *pdev)
+{
+	struct device_node *np = pdev->dev.of_node;
+	int ret;
+
+	if (g_led_sw)
+		return 0; /* 이미 초기화됨 */
+
+	g_led_sw = devm_kzalloc(&pdev->dev, sizeof(*g_led_sw), GFP_KERNEL);
 	if (!g_led_sw)
 		return -ENOMEM;
 
@@ -333,98 +363,110 @@ static int __init led_sw_init(void)
 	init_waitqueue_head(&g_led_sw->wq);
 	INIT_KFIFO(g_led_sw->fifo);
 
-	g_led_sw->pin_led_green      = gpio_green;
-	g_led_sw->pin_led_yellow     = gpio_yellow;
-	g_led_sw->pin_led_red        = gpio_red;
-	g_led_sw->pin_sw_scan_start  = gpio_scan_start;
-	g_led_sw->pin_sw_ems         = gpio_ems;
+	/* DeviceTree 노드 속성 해석 (없으면 모듈 파라미터 기본값 적용) */
+	g_led_sw->pin_led_green     = gpio_green;
+	g_led_sw->pin_led_yellow    = gpio_yellow;
+	g_led_sw->pin_led_red       = gpio_red;
+	g_led_sw->pin_sw_scan_start = gpio_scan_start;
+	g_led_sw->pin_sw_ems        = gpio_ems;
+
+	if (np) {
+		int gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-led-green", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_led_green = gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-led-yellow", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_led_yellow = gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-led-red", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_led_red = gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-sw-scan-start", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_sw_scan_start = gpio_tmp;
+
+		gpio_tmp = of_get_named_gpio(np, "gpios-sw-ems", 0);
+		if (gpio_tmp >= 0)
+			g_led_sw->pin_sw_ems = gpio_tmp;
+	}
 
 	/* GPIO 요청 - LED */
-	ret = gpio_request_one(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
+	ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
 	if (ret)
-		pr_warn("led_sw: gpio_request green (%d) failed: %d\n", g_led_sw->pin_led_green, ret);
+		pr_warn("led_sw: gpio green (%d) request result: %d\n", g_led_sw->pin_led_green, ret);
 
-	ret = gpio_request_one(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow");
+	ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow");
 	if (ret)
-		pr_warn("led_sw: gpio_request yellow (%d) failed: %d\n", g_led_sw->pin_led_yellow, ret);
+		pr_warn("led_sw: gpio yellow (%d) request result: %d\n", g_led_sw->pin_led_yellow, ret);
 
-	ret = gpio_request_one(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
+	ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
 	if (ret)
-		pr_warn("led_sw: gpio_request red (%d) failed: %d\n", g_led_sw->pin_led_red, ret);
+		pr_warn("led_sw: gpio red (%d) request result: %d\n", g_led_sw->pin_led_red, ret);
 
-	/* GPIO 요청 - Switches (Active Low, Pull Up) */
-	ret = gpio_request_one(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
-	if (ret) {
-		pr_err("led_sw: gpio_request scan_start (%d) failed: %d\n", g_led_sw->pin_sw_scan_start, ret);
-		goto err_leds;
-	}
+	/* GPIO 요청 - Switches */
+	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
+	if (ret)
+		pr_warn("led_sw: gpio scan_start (%d) request result: %d\n", g_led_sw->pin_sw_scan_start, ret);
 
-	ret = gpio_request_one(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
-	if (ret) {
-		pr_err("led_sw: gpio_request ems (%d) failed: %d\n", g_led_sw->pin_sw_ems, ret);
-		goto err_sw_start;
-	}
+	ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
+	if (ret)
+		pr_warn("led_sw: gpio ems (%d) request result: %d\n", g_led_sw->pin_sw_ems, ret);
 
 	/* 타이머 초기화 */
 	timer_setup(&g_led_sw->timer_scan_start, scan_start_timer_handler, 0);
 	timer_setup(&g_led_sw->timer_ems, ems_timer_handler, 0);
 
 	/* IRQ 등록 */
-	g_led_sw->irq_scan_start = gpio_to_irq(g_led_sw->pin_sw_scan_start);
-	if (g_led_sw->irq_scan_start >= 0) {
-		ret = request_irq(g_led_sw->irq_scan_start, scan_start_irq_handler,
-				  IRQF_TRIGGER_FALLING, "sw_scan_start_irq", g_led_sw);
-		if (ret)
-			pr_warn("led_sw: request_irq scan_start failed: %d\n", ret);
+	if (gpio_is_valid(g_led_sw->pin_sw_scan_start)) {
+		g_led_sw->irq_scan_start = gpio_to_irq(g_led_sw->pin_sw_scan_start);
+		if (g_led_sw->irq_scan_start >= 0) {
+			ret = request_irq(g_led_sw->irq_scan_start, scan_start_irq_handler,
+					  IRQF_TRIGGER_FALLING, "sw_scan_start_irq", g_led_sw);
+			if (ret)
+				pr_warn("led_sw: request_irq scan_start failed: %d\n", ret);
+		}
+	} else {
+		g_led_sw->irq_scan_start = -1;
 	}
 
-	g_led_sw->irq_ems = gpio_to_irq(g_led_sw->pin_sw_ems);
-	if (g_led_sw->irq_ems >= 0) {
-		ret = request_irq(g_led_sw->irq_ems, ems_irq_handler,
-				  IRQF_TRIGGER_FALLING, "sw_ems_irq", g_led_sw);
-		if (ret)
-			pr_warn("led_sw: request_irq ems failed: %d\n", ret);
+	if (gpio_is_valid(g_led_sw->pin_sw_ems)) {
+		g_led_sw->irq_ems = gpio_to_irq(g_led_sw->pin_sw_ems);
+		if (g_led_sw->irq_ems >= 0) {
+			ret = request_irq(g_led_sw->irq_ems, ems_irq_handler,
+					  IRQF_TRIGGER_FALLING, "sw_ems_irq", g_led_sw);
+			if (ret)
+				pr_warn("led_sw: request_irq ems failed: %d\n", ret);
+		}
+	} else {
+		g_led_sw->irq_ems = -1;
 	}
 
 	/* misc device 등록 (/dev/led_sw) */
-	g_led_sw->misc.minor   = MISC_DYNAMIC_MINOR;
-	g_led_sw->misc.name    = LED_SW_DEV_NAME;
-	g_led_sw->misc.fops    = &led_sw_fops;
-	g_led_sw->misc.mode    = 0666;
+	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
+	g_led_sw->misc.name     = LED_SW_DEV_NAME;
+	g_led_sw->misc.fops     = &led_sw_fops;
+	g_led_sw->misc.mode     = 0666;
 	g_led_sw->misc.nodename = LED_SW_DEV_NAME;
 
 	ret = misc_register(&g_led_sw->misc);
 	if (ret) {
-		pr_err("led_sw: misc_register failed: %d\n", ret);
-		goto err_irqs;
+		pr_err("led_sw: misc_register result: %d\n", ret);
 	}
 
-	pr_info("led_sw: driver registered successfully (/dev/%s)\n", LED_SW_DEV_NAME);
+	platform_set_drvdata(pdev, g_led_sw);
+	pr_info("led_sw: driver probed & registered successfully (/dev/%s)\n", LED_SW_DEV_NAME);
 	return 0;
-
-err_irqs:
-	if (g_led_sw->irq_ems >= 0)
-		free_irq(g_led_sw->irq_ems, g_led_sw);
-	if (g_led_sw->irq_scan_start >= 0)
-		free_irq(g_led_sw->irq_scan_start, g_led_sw);
-	led_sw_del_timer_sync(&g_led_sw->timer_ems);
-	led_sw_del_timer_sync(&g_led_sw->timer_scan_start);
-	gpio_free(g_led_sw->pin_sw_ems);
-err_sw_start:
-	gpio_free(g_led_sw->pin_sw_scan_start);
-err_leds:
-	gpio_free(g_led_sw->pin_led_red);
-	gpio_free(g_led_sw->pin_led_yellow);
-	gpio_free(g_led_sw->pin_led_green);
-	kfree(g_led_sw);
-	g_led_sw = NULL;
-	return ret;
 }
 
-static void __exit led_sw_exit(void)
+static int led_sw_remove(struct platform_device *pdev)
 {
+	(void)pdev;
 	if (!g_led_sw)
-		return;
+		return 0;
 
 	misc_deregister(&g_led_sw->misc);
 
@@ -441,16 +483,64 @@ static void __exit led_sw_exit(void)
 	set_led_hw(g_led_sw, LED_YELLOW, 0);
 	set_led_hw(g_led_sw, LED_RED, 0);
 
-	gpio_free(g_led_sw->pin_sw_ems);
-	gpio_free(g_led_sw->pin_sw_scan_start);
-	gpio_free(g_led_sw->pin_led_red);
-	gpio_free(g_led_sw->pin_led_yellow);
-	gpio_free(g_led_sw->pin_led_green);
+	if (gpio_is_valid(g_led_sw->pin_sw_ems))
+		gpio_free(g_led_sw->pin_sw_ems);
+	if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
+		gpio_free(g_led_sw->pin_sw_scan_start);
+	if (gpio_is_valid(g_led_sw->pin_led_red))
+		gpio_free(g_led_sw->pin_led_red);
+	if (gpio_is_valid(g_led_sw->pin_led_yellow))
+		gpio_free(g_led_sw->pin_led_yellow);
+	if (gpio_is_valid(g_led_sw->pin_led_green))
+		gpio_free(g_led_sw->pin_led_green);
 
-	kfree(g_led_sw);
 	g_led_sw = NULL;
+	pr_info("led_sw: driver removed\n");
+	return 0;
+}
 
-	pr_info("led_sw: driver unregistered\n");
+static const struct of_device_id led_sw_of_match[] = {
+	{ .compatible = "adts,led-sw" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, led_sw_of_match);
+
+static struct platform_driver led_sw_platform_driver = {
+	.probe  = led_sw_probe,
+	.remove = led_sw_remove,
+	.driver = {
+		.name           = "led_sw_custom",
+		.of_match_table = led_sw_of_match,
+		.owner          = THIS_MODULE,
+	},
+};
+
+/* ---------------------------------------------------------------------------
+ *  Init & Exit
+ * ------------------------------------------------------------------------- */
+static int __init led_sw_init(void)
+{
+	(void)platform_driver_register(&led_sw_platform_driver);
+
+	/* DT 오버레이가 미로딩되었거나 probe 수동 호출 필요 시 폴백 생성 */
+	if (!g_led_sw) {
+		g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
+		if (IS_ERR(g_plat_dev)) {
+			g_plat_dev = NULL;
+		}
+	}
+
+	return 0;
+}
+
+static void __exit led_sw_exit(void)
+{
+	if (g_plat_dev) {
+		platform_device_unregister(g_plat_dev);
+		g_plat_dev = NULL;
+	}
+	platform_driver_unregister(&led_sw_platform_driver);
+	pr_info("led_sw: module exit completed\n");
 }
 
 module_init(led_sw_init);
