@@ -108,8 +108,16 @@ static int turret_send_frame(struct turret_dev *dev, u8 cmd,
 	frame[total + 1] = (crc >> 8) & 0xFF;
 	total += PROTO_CRC_LEN;
 
-	print_hex_dump(KERN_INFO, "turret TX: ",
-		       DUMP_PREFIX_NONE, 16, 1, frame, total, false);
+	/* ⚠️ KERN_INFO 였는데 KERN_DEBUG 로 낮춘다. 데몬이 100ms 마다 PING 을
+	 * 보내므로 초당 10줄이 무조건 쌓이고, 커널 링버퍼가 그걸로 가득 차서
+	 * 정작 봐야 할 메시지(다른 드라이버의 probe 실패 등)가 밀려난다.
+	 * 실제로 IMU 고장 로그를 이 홍수 때문에 못 봤다.
+	 *
+	 * 필요할 때만 켠다:
+	 *   echo 'file turret_driver.c +p' > /sys/kernel/debug/dynamic_debug/control
+	 * (CONFIG_DYNAMIC_DEBUG 가 없으면 모듈을 -DDEBUG 로 빌드) */
+	print_hex_dump_debug("turret TX: ",
+			     DUMP_PREFIX_NONE, 16, 1, frame, total, false);
 
 	/* 블로킹 전송(1초 타임아웃). serdev 가 TX FIFO 로 밀어냄. */
 	ret = serdev_device_write(dev->serdev, frame, total, HZ);
