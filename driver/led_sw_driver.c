@@ -118,18 +118,15 @@ static struct platform_device *g_plat_dev = NULL;
 static void sw_poll_timer_handler(struct timer_list *t)
 {
 	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
-	int val_scan = 1, val_ems = 1;
+	/* 스위치는 pull-up + active-low 라 눌리면 0 이다. 핀이 없으면 안 눌린
+	 * 것으로 본다 — 없는 스위치가 계속 눌린 상태로 보이면 EMS 가 상시 발동한다. */
 	u8 pressed_scan = 0, pressed_ems = 0;
 
-	if (gpio_is_valid(dev->pin_sw_scan_start)) {
-		val_scan = gpio_get_value(dev->pin_sw_scan_start);
-		pressed_scan = (val_scan == 0) ? 1 : 0;
-	}
-	
-	if (gpio_is_valid(dev->pin_sw_ems)) {
-		val_ems = gpio_get_value(dev->pin_sw_ems);
-		pressed_ems = (val_ems == 0) ? 1 : 0;
-	}
+	if (gpio_is_valid(dev->pin_sw_scan_start))
+		pressed_scan = (gpio_get_value(dev->pin_sw_scan_start) == 0) ? 1 : 0;
+
+	if (gpio_is_valid(dev->pin_sw_ems))
+		pressed_ems = (gpio_get_value(dev->pin_sw_ems) == 0) ? 1 : 0;
 
 	if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
 		dev->sw_state[SW_SCAN_START] = pressed_scan;
@@ -481,7 +478,16 @@ static int led_sw_probe(struct platform_device *pdev)
 
 	ret = misc_register(&g_led_sw->misc);
 	if (ret) {
-		pr_err("led_sw: misc_register result: %d\n", ret);
+		/* ⚠️ 예전엔 로그만 남기고 0 을 반환했다. 그러면 /dev/led_sw 가 없는데도
+		 *   insmod 가 성공하고 probe 성공 로그까지 찍혀서, 데몬이 "open 실패 →
+		 *   degraded" 로 조용히 넘어간 이유를 찾기 어려웠다. 실패는 실패로 알린다. */
+		pr_err("led_sw: misc_register failed: %d\n", ret);
+		if (g_led_sw->buzzer_thread) {
+			kthread_stop(g_led_sw->buzzer_thread);
+			g_led_sw->buzzer_thread = NULL;
+		}
+		led_sw_del_timer_sync(&g_led_sw->poll_timer);
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, g_led_sw);
@@ -489,13 +495,12 @@ static int led_sw_probe(struct platform_device *pdev)
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-static void led_sw_remove(struct platform_device *pdev)
-#else
-static int led_sw_remove(struct platform_device *pdev)
-#endif
+/* 정리 본체. remove 시그니처가 커널 버전마다 다른데(6.1 부터 void), 본체를
+ * #if 두 개 사이에 끼워 두면 정적분석기가 "int 인데 return 이 없다"로 오탐한다
+ * (조건을 못 풀어 시그니처와 말미 return 을 따로 고른다). 본체를 빼내면
+ * 각 래퍼가 그 자체로 완결돼 오탐이 사라지고 읽기도 쉽다. */
+static void led_sw_teardown(void)
 {
-	(void)pdev;
 	if (g_led_sw) {
 		misc_deregister(&g_led_sw->misc);
 
@@ -528,10 +533,22 @@ static int led_sw_remove(struct platform_device *pdev)
 		g_led_sw = NULL;
 		pr_info("led_sw: driver removed\n");
 	}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	return 0;
-#endif
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+static void led_sw_remove(struct platform_device *pdev)
+{
+	(void)pdev;
+	led_sw_teardown();
+}
+#else
+static int led_sw_remove(struct platform_device *pdev)
+{
+	(void)pdev;
+	led_sw_teardown();
+	return 0;
+}
+#endif
 
 static const struct of_device_id led_sw_of_match[] = {
 	{ .compatible = "adts,led-sw" },
