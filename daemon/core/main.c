@@ -71,6 +71,10 @@ struct core {
     uint64_t hb_last_pong;     /* 마지막 PONG 관측 시각(mono ms)    */
     bool     hb_primed;        /* 최초 GET_STATE 로 기준선 설정 여부 */
 
+    /* 마지막으로 **로그에 찍은** STM 에러코드. 드라이버가 주는 last_err 는
+     * 다음 성공까지 값이 유지되므로, 그대로 찍으면 100ms tick 마다 같은 줄이
+     * 초당 10회 쌓인다. 값이 바뀔 때만 찍기 위한 에지 검출용이다. */
+    uint8_t  last_err_seen;
 
     /* 스캔 전 자동 홈. STM 은 홈 전 SCAN_START 를 ERR_NOT_HOMED 로 거절하므로
      * 요청이 들어오면 먼저 홈을 세우고 STF_HOMED 를 기다린다. */
@@ -377,8 +381,26 @@ static void core_read_state(struct core *c)
         core_transition(c, ST_DISARM);
         return;
     }
+    /* ⚠️ 예전에는 이 로그가 `state == ST_SCANNING` 안에 갇혀 있었다. 그런데
+     *   홈 대기 중 상태는 ST_IDLE 이라, STM 이 홈 도중 올린 ERR_NOT_HOMED
+     *   (엔코더 I2C 판독 실패) / ERR_STALL(홈 수렴 실패) 이 last_err 에 담기기만
+     *   하고 아무 데도 안 찍혔다. 데몬 화면에는 20초 침묵 뒤 "홈 무응답" 만
+     *   남아서, 실제로는 STM 이 또렷하게 이유를 말했는데도 링크 문제로 오해했다.
+     *
+     *   그래서 **보고(어느 상태에서든)와 DISARM(스캔 중에만)을 분리**한다.
+     *   IDLE 에서의 에러는 요청 거절이지 비상정지가 아니므로 전이하지 않는다.
+     *
+     *   같은 코드가 매 tick(100ms) 반복 출력되지 않도록 값이 바뀔 때만 찍는다.
+     *   STM 은 last_err 를 다음 성공까지 유지하므로 그러지 않으면 초당 10줄이다. */
+    if (st.last_err != c->last_err_seen) {
+        c->last_err_seen = st.last_err;
+        if (st.last_err != ERR_NONE) {
+            core_log(c, "STM", "CMD_ERROR code=%u (state=%s)",
+                     st.last_err, daemon_state_str(c->ctx.state));
+        }
+    }
     if (st.last_err != ERR_NONE && c->ctx.state == ST_SCANNING) {
-        core_log(c, "STM", "CMD_ERROR code=%u -> DISARM", st.last_err);
+        core_log(c, "STM", "스캔 중 오류 -> DISARM");
         core_transition(c, ST_DISARM);
     }
 }
