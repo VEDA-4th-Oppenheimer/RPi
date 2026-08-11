@@ -477,6 +477,44 @@ static bool core_await_home(struct core *c)
     return waiting;
 }
 
+/* DISARM -> IDLE 복구(REARM).
+ *
+ * ★ 모터 재인가 명령은 보내지 않는다. protocol v5 에 CMD_ARM 이 없고, STM 은
+ *   다음 HOME/SCAN_START 에서 스텝을 다시 켠다. 데몬은 스캔 직전에 항상 홈을
+ *   다시 잡으므로(core_await_home), 복구는 데몬 상태만 되돌리면 충분하다.
+ *   ⚠️ 즉 REARM 직후의 축 위치는 여전히 미지다 — "다시 스캔을 걸 수 있는
+ *     상태" 로 돌아갈 뿐, 물리적으로 홈에 선 것이 아니다.
+ *
+ * ★ 링크가 죽어 있으면 거부한다. 그 상태로 IDLE 로 올려봐야 다음 tick 의
+ *   heartbeat 판정(core_read_state)이 곧바로 다시 DISARM 으로 떨어뜨린다.
+ *   그 왕복은 retained 상태 발행으로 그대로 나가 Qt 화면만 깜빡이고, 조작자는
+ *   "복구가 왜 안 되는지" 를 읽을 수 없다. 여기서 이유를 로그로 남기고 막는다.
+ *   (link_alive 는 DISARM 중에도 매 tick 갱신되므로 STM 이 돌아오면 저절로
+ *    통과한다 — 데몬 재시작이 필요하지 않다) */
+static void core_rearm(struct core *c)
+{
+    if (c->ctx.state != ST_DISARM) {
+        core_log(c, "REARM", "%s 상태 — 무시 (DISARM 에서만 복구)",
+                 daemon_state_str(c->ctx.state));
+        return;
+    }
+    if ((c->turret_fd >= 0) && (c->ctx.link.link_alive == 0u)) {
+        core_log(c, "REARM", "링크 단절 중 — 복구 거부 (STM32/UART 확인)");
+        return;
+    }
+
+    /* 대기 중이던 스캔 요청을 버린다. DISARM 직전에 들어와 있던 요청을 그대로
+     * 두면 복구하자마자 조작자가 시키지도 않은 스캔이 시작된다 — 비상정지를
+     * 누른 사람이 가장 원하지 않는 동작이다. */
+    c->ctx.req.valid     = 0u;
+    c->ctx.req_scan_stop = 0u;
+    c->home_req_first_ms = 0u;      /* 홈 대기 중 정지했을 수 있다 */
+    c->home_req_last_ms  = 0u;
+
+    core_log(c, "REARM", "DISARM 해제 — IDLE 복귀 (스캔은 다시 요청해야 한다)");
+    core_transition(c, ST_IDLE);
+}
+
 static void core_eval_state(struct core *c)
 {
     switch (c->ctx.state) {
@@ -700,6 +738,13 @@ static void core_tick(struct core *c)
 
     core_poll_link(c);           /* STM 링크 캐시 + heartbeat 판정 */
 
+    /* ⚠️ 복구를 정지보다 **먼저** 소비한다. 같은 tick 에 둘 다 서면(예: 조작자가
+     *   REARM 을 누른 직후 링크가 끊겨 자동 정지가 걸린 경우) 나중에 처리되는
+     *   쪽이 최종 상태가 되므로, 안전정지가 항상 이기도록 순서를 고정한다. */
+    if (c->ctx.req_rearm != 0u) {           /* DISARM 해제 요청 */
+        c->ctx.req_rearm = 0u;
+        core_rearm(c);
+    }
     if (c->ctx.req_disarm != 0u) {          /* 모듈이 정지 요청 */
         c->ctx.req_disarm = 0u;
         core_transition(c, ST_DISARM);

@@ -47,6 +47,7 @@
  *       └──────────────────(파일 마감·전달 완료)───────────────────────────────┘
  *
  *     DISARM <── 링크단절 / STM 에러(CMD_ERROR) / 사용자 정지 ── (어느 상태에서든)
+ *     DISARM ──(cmd/rearm, 링크가 살아있을 때만)──> IDLE
  *
  *   - 코어가 상태를 소유하고 전이시킨다.
  *   - 모듈은 on_tick(state) 로 현재 상태를 통보받고, core_request_state() 로
@@ -135,6 +136,10 @@ struct shared_ctx {
     /* 모듈 -> 코어 이벤트 요청 플래그 (코어가 매 tick 소비 후 클리어) */
     uint8_t  req_scan_stop;         /* mqtt: scan/stop 수신                   */
     uint8_t  req_disarm;            /* 임의 모듈: 안전정지 요청               */
+    /* DISARM 해제 요청. 코어가 복구 가능 여부를 판정한다(링크가 죽어 있으면
+     * 거부) — 모듈은 "사용자가 눌렀다" 만 전달하고 판단은 하지 않는다.
+     * 같은 tick 에 req_disarm 과 함께 서면 안전정지가 이긴다. */
+    uint8_t  req_rearm;             /* mqtt: cmd/rearm 수신                   */
 
     void    *core;                  /* 코어 핸들 (core_* API 호출용)          */
 };
