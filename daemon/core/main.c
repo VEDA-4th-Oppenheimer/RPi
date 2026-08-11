@@ -104,6 +104,10 @@ struct core {
      *   비상 정지(link_dead / CMD_ERROR / SIGTERM)는 이 플래그가 false 라
      *   기존대로 DISARM 이 나간다. */
     bool     clean_exit;
+    /* --once 로 돌 때 스캔이 실제로 산출까지 갔는지. 배치 스크립트가 종료코드
+     * 하나로 성공/실패를 가릴 수 있게 한다 — 한국어 로그를 grep 하게 만들면
+     * 문구를 바꿀 때마다 스크립트가 조용히 깨진다. */
+    bool     scan_failed;
 
     /* 무입력 타임아웃 (SCAN_DONE 유실 대비 안전망) */
     uint64_t last_point_ms;        /* 마지막 점 수신 시각 */
@@ -491,6 +495,17 @@ static void core_eval_state(struct core *c)
                 if (!cancelled) {
                     c->ctx.req.valid = 0u;            /* 요청 소비 */
                     core_transition(c, ST_SCANNING);
+                } else if (c->exit_after_scan) {
+                    /* ⚠️ 홈 무응답·수평 NG 로 요청이 버려졌다. 예전에는 여기서
+                     *   아무것도 안 해서 --once 데몬이 **영원히 살아 있었다.**
+                     *   스캔은 영영 안 오는데 프로세스는 안 죽으니, 배치로
+                     *   돌리면 첫 실패에서 통째로 멈춘다. 종료한다. */
+                    core_log(c, "CLI", "--once: 스캔 요청이 취소됨 → 실패 종료");
+                    c->scan_failed = true;
+                    c->clean_exit  = true;
+                    c->running     = false;
+                } else {
+                    /* 상주 모드면 다음 요청을 계속 기다린다 */
                 }
             }
         }
@@ -925,5 +940,7 @@ int main(int argc, char **argv)
 
     core_run(&core);
     core_shutdown(&core);
-    return 0;
+    /* 스캔이 취소된 채 --once 로 끝났으면 실패로 알린다. 배치 스크립트가
+     * 로그를 grep 하지 않고 종료코드만 보면 되도록. */
+    return core.scan_failed ? 1 : 0;
 }
