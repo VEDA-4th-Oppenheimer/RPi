@@ -140,6 +140,10 @@ struct shared_ctx {
      * 거부) — 모듈은 "사용자가 눌렀다" 만 전달하고 판단은 하지 않는다.
      * 같은 tick 에 req_disarm 과 함께 서면 안전정지가 이긴다. */
     uint8_t  req_rearm;             /* mqtt: cmd/rearm 수신                   */
+    /* 스캔 없이 홈만 세우는 요청. 코어는 스캔 직전에 어차피 홈을 다시 잡으므로
+     * 필수는 아니지만, 설치·정비 때 축을 홈 자세로 보내 확인하는 용도다.
+     * IDLE 에서만 받는다. 진행 상황은 link.homed 가 0 -> 1 로 알린다. */
+    uint8_t  req_home;              /* mqtt: cmd/home 수신                    */
 
     void    *core;                  /* 코어 핸들 (core_* API 호출용)          */
 };

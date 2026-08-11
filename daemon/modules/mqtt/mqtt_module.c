@@ -377,11 +377,11 @@ static void on_message(struct mosquitto *m, void *user,
         ctx->req_rearm = 1u;
         core_log(ctx->core, "MQTT", "rearm 요청 [%s]", s_req_id);
     } else if (strcmp(msg->topic, T_CMD_HOME) == 0) {
-        /* 홈만 따로 거는 경로. 코어는 스캔 요청이 있을 때 자동으로 홈을 잡으므로
-         * 보통 불필요하지만, Qt 가 수동으로 확인하고 싶을 때를 위해 남긴다. */
-        ctx->req.valid = 0u;
-        core_log(ctx->core, "MQTT", "home 요청 [%s] — 코어가 스캔 전 자동 수행",
-                 s_req_id);
+        /* 스캔 없이 홈만 세운다. 코어는 스캔 직전에 어차피 홈을 다시 잡으므로
+         * 스캔 전에는 불필요하지만, 설치·정비 때 축을 홈 자세로 보내 눈으로
+         * 확인하는 용도로 쓴다. 수용 여부(IDLE 인가, 중복인가)는 코어가 본다. */
+        ctx->req_home = 1u;
+        core_log(ctx->core, "MQTT", "home 요청 [%s]", s_req_id);
     } else {
         core_log(ctx->core, "MQTT", "알 수 없는 토픽: %s", msg->topic);
     }
