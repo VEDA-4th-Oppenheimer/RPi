@@ -1,81 +1,212 @@
 /* ============================================================================
- *  led_module.c  --  /dev/led (상태 LED x3 + 액티브 부저 x1)  [STUB]
- *  담당: 이현우
+ *  led_module.c  --  /dev/led_sw (상태 LED x3 + 스위치 x2 통합 연동)
+ *  담당: 강유근
  *
- *  RPi GPIO 직결 자작 캐릭터 드라이버 /dev/led 를 통해 킷 상태를 표시한다.
- *  드라이버는 "얇게" — 핀 on/off 만. 점멸·비프 패턴의 타이밍은 이 모듈이 만든다.
+ *  RPi GPIO 직결 캐릭터 드라이버 /dev/led_sw 를 통해 킷 상태를 표시하고
+ *  스위치 입력에 대응하여 프로토콜 동작을 트리거한다.
  *
- *  ★ 부저는 액티브(단일 톤 on/off)라 이벤트 구분을 "비프 패턴"으로 한다.
- *    (패시브+PWM 별도 /dev/buzzer 는 과설계라 기각 — /dev/led 에 채널 편입)
+ *  하드웨어 구성 및 프로토콜 점등 규칙:
+ *   상태 / 프로토콜          | LED_초록 | LED_노랑 | LED_빨강 | 설명
+ *   -----------------------|----------|----------|----------|--------------------------------
+ *   ST_IDLE (명령 대기)     | OFF      | ON       | OFF      | 명령 대기 중 (정상 상태)
+ *   ST_SCANNING (제어 동작) | ON       | OFF      | OFF      | 명령코드 중 제어코드 동작 중
+ *   ST_EXPORT (처리 마무리) | ON       | OFF      | OFF      | 데이터 파일 출력 중
+ *   ST_DISARM / 에러 발생   | OFF      | OFF      | ON       | 에러(코드) 발생 / 비상 정지
  *
- *   상태          | LED        | 부저
- *   --------------|------------|---------------------
- *   수평 NG       | 빨강       | 길게 1회 (경고)
- *   SCANNING      | 진행 점멸  | 무음
- *   완료(EXPORT)  | 초록       | 짧게 2회
- *   에러(DISARM)  | 빨강       | 짧게 3회
- *
- *  ※ 수평 NG 는 FSM 상태가 아니라 "SCANNING 진입 거부"로 나타난다.
- *    코어가 게이트에서 막으면 IDLE 에 머무르므로, 그 표시는 코어 로그/ctx->level
- *    을 보고 이 모듈이 판단한다(TODO).
+ *  스위치 연동:
+ *   - 스위치_scan_start (SW_SCAN_START) : 스캔 시작 요청 (CMD_SCAN_START)
+ *   - 스위치_ems (SW_EMS)               : 즉시 안전정지 요청 (CMD_DISARM)
  * ==========================================================================*/
-#include "daemon_module.h"
-#include <stdio.h>
 
-/* #define LED_DEV "/dev/led"
- * ioctl 규약(예정): LED_SET { ch_id, on }  — ch: 0=green,1=red,2=busy,3=buzzer */
+#include "daemon_module.h"
+#include "protocol.h"
+#include "led_sw.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+
+static int s_fd = -1;
+static struct led_sw_ctrl s_last_ctrl = {0, 0, 0, 0};
+
+enum buzzer_seq {
+    BUZ_NONE = 0,
+    BUZ_SCAN_DONE,
+    BUZ_ERROR
+};
+static enum buzzer_seq s_buz_seq = BUZ_NONE;
+static int s_buz_ticks = 0;
+static uint8_t s_last_err = 0; /* 0 = ERR_NONE */
+
+static void update_leds_buzzer(const struct shared_ctx *ctx)
+{
+    struct led_sw_ctrl ctrl = {0, 0, 0, 0};
+
+    if (s_fd < 0) {
+        return;
+    }
+
+    /* 1. LED 상태 결정 */
+    if (ctx->state == ST_DISARM || ctx->link.last_err != 0 /* ERR_NONE */ || !ctx->link.link_alive) {
+        ctrl.red = 1u;
+    } else if (ctx->state == ST_SCANNING || ctx->state == ST_EXPORT || ctx->link.scanning) {
+        ctrl.green = 1u;
+    } else {
+        ctrl.yellow = 1u;
+    }
+
+    /* 2. 부저 시퀀스 로직 (1 tick = 100ms) */
+    if (s_buz_seq == BUZ_SCAN_DONE) {
+        /* 0.5초 1번 = 5 ticks ON */
+        if (s_buz_ticks < 5) {
+            ctrl.buzzer = 1u;
+            s_buz_ticks++;
+        } else {
+            ctrl.buzzer = 0u;
+            s_buz_seq = BUZ_NONE;
+        }
+    } else if (s_buz_seq == BUZ_ERROR) {
+        /* 0.2초 간격 2번 짧게 = 2 ticks ON, 2 ticks OFF, 2 ticks ON */
+        if (s_buz_ticks < 2) {
+            ctrl.buzzer = 1u;
+        } else if (s_buz_ticks < 4) {
+            ctrl.buzzer = 0u;
+        } else if (s_buz_ticks < 6) {
+            ctrl.buzzer = 1u;
+        } else {
+            ctrl.buzzer = 0u;
+            s_buz_seq = BUZ_NONE;
+        }
+        
+        if (s_buz_seq != BUZ_NONE) {
+            s_buz_ticks++;
+        }
+    }
+
+    /* 3. 상태 변화 시에만 ioctl 호출 */
+    if (ctrl.green != s_last_ctrl.green ||
+        ctrl.yellow != s_last_ctrl.yellow ||
+        ctrl.red != s_last_ctrl.red ||
+        ctrl.buzzer != s_last_ctrl.buzzer) {
+
+        if (ioctl(s_fd, LED_SW_SET_LEDS, &ctrl) < 0) {
+            (void)fprintf(stderr, "[led     ] ioctl(LED_SW_SET_LEDS) failed: %s\n", strerror(errno));
+        } else {
+            s_last_ctrl = ctrl;
+        }
+    }
+}
 
 static int led_init(struct shared_ctx *ctx)
 {
     (void)ctx;
-    /* TODO: open(LED_DEV) — 없으면 degraded 로 계속(0 반환) */
-    (void)fprintf(stderr,
-        "[led     ] init (STUB — /dev/led 미구현)\n");
+    s_fd = open(LED_SW_DEV_PATH, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (s_fd < 0) {
+        (void)fprintf(stderr,
+            "[led     ] %s open failed (%s) — degraded mode\n",
+            LED_SW_DEV_PATH, strerror(errno));
+        return 0; /* 드라이버 없어도 데몬 지속 */
+    }
+
+    (void)fprintf(stderr, "[led     ] init (%s opened successfully)\n", LED_SW_DEV_PATH);
+
+    /* 초기 LED 상태 설정 (노랑 ON: 명령 대기) */
+    s_last_ctrl.green  = 0;
+    s_last_ctrl.yellow = 1;
+    s_last_ctrl.red    = 0;
+    s_last_ctrl.buzzer = 0;
+    (void)ioctl(s_fd, LED_SW_SET_LEDS, &s_last_ctrl);
+
     return 0;
 }
 
 static int led_get_fd(void)
 {
-    return -1;   /* 출력 전용. epoll 대상 아님 */
+    return s_fd; /* epoll 에 등록하여 스위치 press 이벤트 수신 */
 }
 
-/* cppcheck-suppress constParameterCallback ; on_tick 은 daemon_module 콜백 ABI
- * (void(*)(struct shared_ctx*, daemon_state_t)) 라 ctx 를 const 로 못 바꾼다. */
+static void led_on_event(struct shared_ctx *ctx)
+{
+    struct led_sw_event evt;
+    ssize_t ret;
+
+    if (s_fd < 0 || ctx == NULL) {
+        return;
+    }
+
+    /* FIFO 이벤트 모두 읽기 */
+    while ((ret = read(s_fd, &evt, sizeof(evt))) == (ssize_t)sizeof(evt)) {
+        if (evt.state != 1u) {
+            continue; /* press 이벤트만 처리 */
+        }
+
+        if (evt.sw_id == SW_SCAN_START) {
+            (void)fprintf(stderr, "[led     ] SW_SCAN_START pressed -> CMD_SCAN_START trigger\n");
+            if (ctx->req.valid == 0u) {
+                ctx->req.pan_start_ddeg   = 0;       /* 0.0 도 */
+                ctx->req.pan_end_ddeg     = 1800;    /* 180.0 도 */
+                ctx->req.tilt_start_ddeg  = -900;    /* -90.0 도 */
+                ctx->req.tilt_end_ddeg    = 900;     /* +90.0 도 */
+                ctx->req.step_ddeg        = 10;      /* 1.0 도 격자 */
+                ctx->req.sensor_height_mm = 0;
+                ctx->req.valid            = 1u;      /* 코어가 소비 */
+            }
+        } else if (evt.sw_id == SW_EMS) {
+            (void)fprintf(stderr, "[led     ] SW_EMS pressed -> CMD_DISARM trigger\n");
+            ctx->req_disarm = 1u;
+        }
+    }
+}
+
+/* cppcheck-suppress constParameterCallback ; on_tick 은 daemon_module 콜백 ABI */
 static void led_on_tick(struct shared_ctx *ctx, daemon_state_t state)
 {
-    (void)ctx;
     (void)state;
-    /* TODO: 100ms tick 을 세어 패턴 생성
-     *   - ST_SCANNING : busy LED 를 500ms 주기로 토글(진행 표시)
-     *   - 비프 패턴   : 남은 비프 수/길이를 카운터로 관리해 tick 마다 on/off
-     *   블로킹 sleep 금지 (단일 스레드 루프) */
+
+    /* CMD_ERROR 엣지 검출 */
+    if (ctx->link.last_err != 0 && ctx->link.last_err != s_last_err) {
+        s_buz_seq = BUZ_ERROR;
+        s_buz_ticks = 0;
+    }
+    s_last_err = ctx->link.last_err;
+
+    update_leds_buzzer(ctx);
 }
 
-/* cppcheck-suppress constParameterCallback ; 위와 동일(콜백 ABI 고정) */
+/* cppcheck-suppress constParameterCallback ; 콜백 ABI 고정 */
 static void led_on_state(struct shared_ctx *ctx,
                          daemon_state_t old_st, daemon_state_t new_st)
 {
-    (void)ctx;
     (void)old_st;
-    (void)new_st;
-    /* TODO: 상태 전이 시 LED 색 전환 + 비프 패턴 예약
-     *   -> ST_SCANNING : busy 점멸 시작, 무음
-     *   -> ST_EXPORT   : 초록 on, 짧게 2회
-     *   -> ST_DISARM   : 빨강 on, 짧게 3회
-     *   -> ST_IDLE     : 소등(또는 대기 표시) */
+
+    /* SCAN_DONE (ST_EXPORT 진입) 감지 */
+    if (new_st == ST_EXPORT) {
+        s_buz_seq = BUZ_SCAN_DONE;
+        s_buz_ticks = 0;
+    }
+
+    update_leds_buzzer(ctx);
 }
 
 static void led_deinit(struct shared_ctx *ctx)
 {
     (void)ctx;
-    /* TODO: 전 채널 off 후 close(LED_DEV) — 종료 시 부저가 켜진 채 남지 않게 */
+    if (s_fd >= 0) {
+        struct led_sw_ctrl off = {0, 0, 0, 0};
+        (void)ioctl(s_fd, LED_SW_SET_LEDS, &off);
+        (void)close(s_fd);
+        s_fd = -1;
+    }
 }
 
 static const struct daemon_module k_led = {
     "led",
     led_init,
     led_get_fd,
-    NULL,          /* on_event (fd 없음) */
+    led_on_event,
     led_on_tick,
     led_on_state,
     led_deinit,

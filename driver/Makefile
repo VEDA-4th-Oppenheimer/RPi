@@ -46,10 +46,10 @@ APP_CFLAGS := -Wall -Wextra -Werror \
               -z relro -z now
 
 # ── 커널 모듈 (kbuild) ──
-#  두 모듈은 서로 독립이다. /dev/turret 은 serdev(UART), /dev/imu 는 I2C
-#  클라이언트라 공유하는 것이 없다. 요건 ③(자작 드라이버) 근거이기도 하다.
+#  각 모듈은 독립이다: /dev/turret(serdev), /dev/imu(I2C), /dev/led_sw(GPIO)
 obj-m     += turret_driver.o
 obj-m     += imu_driver.o
+obj-m     += led_sw_driver.o
 ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
 
 # ── 유저 앱: protocol.h 위치 자동 탐색 (../shared 우선) ──
@@ -58,7 +58,7 @@ PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $
 # ── 타겟 ──
 .PHONY: all rpi modules clean dtbo
 
-all: modules turret_test imu_test
+all: modules turret_test imu_test led_sw_test
 
 # 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + 유저 앱 전부 arm64
 rpi:
@@ -75,6 +75,10 @@ turret_test: turret_test.c $(PROTO_H)
 imu_test: imu_test.c
 	$(APP_CC) $(APP_CFLAGS) -o $@ $< -lm
 
+# /dev/led_sw 테스트 앱. (LED x3 및 Switch x2 제어)
+led_sw_test: led_sw_test.c
+	$(APP_CC) $(APP_CFLAGS) -I. -I.. -I../shared -o $@ $<
+
 # ── Device Tree 오버레이 ──
 #  overlays/ 에 *-overlay.dts 를 놓기만 하면 자동으로 잡힌다.
 #  (드라이버가 늘어날 때마다 여기를 고치지 않아도 되도록 패턴 규칙을 쓴다)
@@ -88,4 +92,4 @@ overlays/%.dtbo: overlays/%.dts
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f turret_test imu_test overlays/*.dtbo
+	rm -f turret_test imu_test led_sw_test overlays/*.dtbo
