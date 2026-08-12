@@ -169,8 +169,15 @@ static int buzzer_kthread_func(void *data)
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
 			
+			/* pr_info 였는데 낮춘다. 울리는 동안 초당 1줄이 쌓이는데,
+			 * 커널 링버퍼가 주기 로그로 차면 정작 봐야 할 메시지(다른
+			 * 드라이버의 probe 실패 등)가 밀려난다 — turret 드라이버의
+			 * TX 덤프가 IMU 진단을 가렸던 것과 같은 문제다.
+			 *   echo 'file led_sw_driver.c +p' > \
+			 *     /sys/kernel/debug/dynamic_debug/control */
 			if (time_after(jiffies, last_print + HZ)) {
-				pr_info("led_sw: buzzer is active, toggling pin %d\n", dev->pin_buzzer);
+				pr_debug("led_sw: buzzer active, toggling pin %d\n",
+					 dev->pin_buzzer);
 				last_print = jiffies;
 			}
 			/* 약 400Hz 주파수 (반주기 1.25ms). CPU 양보를 위해 usleep_range 사용 */
@@ -359,7 +366,26 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label)
 		return -EINVAL;
 
 	ret = gpio_request_one(pin, flags, label);
-	if (ret == -EBUSY || ret == -EPROBE_DEFER) {
+
+	/* ⚠️ -EPROBE_DEFER 는 여기서 되돌리지 않는다.
+	 *
+	 *   그 코드의 뜻은 "내가 기대는 리소스(gpiochip 등)가 아직 준비되지
+	 *   않았으니 **나중에 다시 불러 달라**" 이다. 즉시 재요청해도 상황이
+	 *   바뀔 리가 없고, 오히려 커널이 준비된 뒤 probe 를 다시 불러줄
+	 *   기회를 없애 deferral 자체를 무력화한다. 그대로 올려보낸다.
+	 *
+	 * ⚠️ -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
+	 *   필요했던 우회이고, 재현할 보드 없이 빼면 probe 가 실패할 수 있다.
+	 *   다만 이건 **남이 쥔 GPIO 를 강제로 뺏는** 동작이라 안전하지 않다.
+	 *   원인 후보:
+	 *     ① 이전 insmod 의 정리 누락으로 우리 자신의 낡은 요청이 남음
+	 *        (remove 경로 결함이 있었으므로 유력하다 — 정리 수정 후
+	 *         -EBUSY 가 아직도 나는지 다시 볼 것)
+	 *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
+	 *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
+	if (ret == -EBUSY) {
+		pr_warn("led_sw: gpio %d busy — 강제 회수 후 재시도 (%s)\n",
+			pin, label);
 		gpio_free(pin);
 		ret = gpio_request_one(pin, flags, label);
 	}
@@ -369,6 +395,18 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label)
 /* ---------------------------------------------------------------------------
  *  Platform Probe & Remove
  * ------------------------------------------------------------------------- */
+/* GPIO·타이머·스레드 정리. **misc device 는 여기서 건드리지 않는다.**
+ *
+ * 이 함수는 두 곳에서 불리는데 misc 상태가 서로 다르기 때문이다:
+ *   probe 실패 경로 — misc_register 가 실패했으므로 등록된 것이 없다
+ *   remove 경로     — 등록돼 있으므로 반드시 deregister 해야 한다
+ * 여기에 misc_deregister 를 넣으면 실패 경로가 등록도 안 된 걸 해제하려 들고,
+ * 빼면 remove 경로에서 문자 디바이스가 남는다. 그래서 **호출자가** 책임진다.
+ *
+ * ⚠️ 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
+ *   /dev/led_sw 가 등록된 채라 fops 가 사라진 모듈을 가리킨다. 누가 열면
+ *   use-after-free 다. 재적재 시 같은 이름으로 misc_register 가 또 불려
+ *   실패할 수도 있다. */
 static void led_sw_teardown(void)
 {
 	if (g_led_sw) {
@@ -529,13 +567,19 @@ static int led_sw_probe(struct platform_device *pdev)
 static void led_sw_remove(struct platform_device *pdev)
 {
 	(void)pdev;
+	if (g_led_sw)
+		misc_deregister(&g_led_sw->misc);
 	led_sw_teardown();
+	pr_info("led_sw: driver removed\n");
 }
 #else
 static int led_sw_remove(struct platform_device *pdev)
 {
 	(void)pdev;
+	if (g_led_sw)
+		misc_deregister(&g_led_sw->misc);
 	led_sw_teardown();
+	pr_info("led_sw: driver removed\n");
 	return 0;
 }
 #endif
