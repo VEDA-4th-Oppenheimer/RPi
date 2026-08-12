@@ -200,9 +200,8 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		break;
 	case LED_RED:
 		pin = dev->pin_led_red;
-		/* 빨강(Red) LED 회로가 Active-Low (0V일 때 켜지고 3.3V일 때 꺼짐)로 배선된 하드웨어 특성 반영 */
-		on = !on;
 		break;
+
 
 	case LED_BUZZER:
 		if (on != dev->led_state[LED_BUZZER]) {
