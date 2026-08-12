@@ -162,33 +162,18 @@ static void sw_poll_timer_handler(struct timer_list *t)
 static int buzzer_kthread_func(void *data)
 {
 	struct led_sw_dev *dev = data;
-	unsigned long last_print = jiffies;
 
 	while (!kthread_should_stop()) {
 		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
 			
-			/* pr_info 였는데 낮춘다. 울리는 동안 초당 1줄이 쌓이는데,
-			 * 커널 링버퍼가 주기 로그로 차면 정작 봐야 할 메시지(다른
-			 * 드라이버의 probe 실패 등)가 밀려난다 — turret 드라이버의
-			 * TX 덤프가 IMU 진단을 가렸던 것과 같은 문제다.
-			 *   echo 'file led_sw_driver.c +p' > \
-			 *     /sys/kernel/debug/dynamic_debug/control */
-			if (time_after(jiffies, last_print + HZ)) {
-				pr_debug("led_sw: buzzer active, toggling pin %d\n",
-					 dev->pin_buzzer);
-				last_print = jiffies;
-			}
-			/* 패시브 피에조 부저 공진 주파수 (~2.7kHz, 반주기 185us).
-			 * 기존 1.25ms(400Hz)는 공진 범위를 벗어나 소리가 안 들리거나 극히 작았음.
-			 * test_buzzer.py 의 4kHz~2.7kHz 공진 대역에 맞춤. */
-			usleep_range(180, 200);
-
+			/* 수동 부저 (Passive Buzzer) softTone 1kHz 톤 생성 (반주기 500us).
+			 * WiringPi 의 softToneWrite(pin, 1000) 과 동일한 방식. */
+			usleep_range(480, 520);
 		} else {
-			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
+			gpio_set_value(dev->pin_buzzer, 0);
 			msleep(20);
-			last_print = jiffies;
 		}
 	}
 	return 0;
@@ -213,12 +198,17 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		pin = dev->pin_led_red;
 		break;
 	case LED_BUZZER:
-		pin = dev->pin_buzzer;
-		break;
-
+		if (on != dev->led_state[LED_BUZZER]) {
+			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
+			if (!on) {
+				gpio_set_value(dev->pin_buzzer, 0);
+			}
+		}
+		return; /* 수동 부저는 kthread가 led_state를 폴링하며 1kHz 펄스를 생성함 */
 	default:
 		return;
 	}
+
 
 	if (gpio_is_valid(pin)) {
 		gpio_set_value(pin, on);
