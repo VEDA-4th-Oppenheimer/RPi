@@ -213,13 +213,9 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 		pin = dev->pin_led_red;
 		break;
 	case LED_BUZZER:
-		if (on != dev->led_state[LED_BUZZER]) {
-			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
-			if (!on) {
-				gpio_set_value(dev->pin_buzzer, 0);
-			}
-		}
-		return; /* 부저는 kthread가 led_state를 폴링하므로 로직 스킵 */
+		pin = dev->pin_buzzer;
+		break;
+
 	default:
 		return;
 	}
