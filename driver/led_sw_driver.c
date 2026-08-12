@@ -53,22 +53,22 @@ MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
 MODULE_VERSION("1.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 17;
-static int gpio_yellow     = 27;
-static int gpio_red        = 22;
-static int gpio_buzzer     = 26;
-static int gpio_scan_start = 23;
-static int gpio_ems        = 24;
+static int gpio_green      = 27;  /* Physical Pin 13 (Green LED) */
+static int gpio_yellow     = 22;  /* Physical Pin 15 (Yellow LED) */
+static int gpio_red        = 17;  /* Physical Pin 11 (Red LED) */
+static int gpio_buzzer     = 26;  /* Physical Pin 37 (Buzzer) */
+static int gpio_scan_start = 23;  /* Physical Pin 16 (Scan Start Sw) */
+static int gpio_ems        = 24;  /* Physical Pin 18 (EMS Sw) */
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
-
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 22)");
 
 module_param(gpio_red, int, 0444);
-MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
+MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 17)");
+
 
 module_param(gpio_scan_start, int, 0444);
 MODULE_PARM_DESC(gpio_scan_start, "GPIO pin for Scan Start Switch (default: 23)");

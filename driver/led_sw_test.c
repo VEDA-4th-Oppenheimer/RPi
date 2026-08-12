@@ -67,10 +67,9 @@ int main(int argc, char *argv[])
             ret = -1;
         } else {
             (void)printf("Current Device State:\n");
-            (void)printf("  LED Green (BCM 17, Pin 11)  : %s\n", st.leds[LED_GREEN] ? "ON" : "OFF");
-            (void)printf("  LED Yellow (BCM 27, Pin 13) : %s\n", st.leds[LED_YELLOW] ? "ON" : "OFF");
-
-            (void)printf("  LED Red (BCM 22, Pin 15)    : %s\n", st.leds[LED_RED] ? "ON" : "OFF");
+            (void)printf("  LED Green (BCM 27, Pin 13)  : %s\n", st.leds[LED_GREEN] ? "ON" : "OFF");
+            (void)printf("  LED Yellow (BCM 22, Pin 15) : %s\n", st.leds[LED_YELLOW] ? "ON" : "OFF");
+            (void)printf("  LED Red (BCM 17, Pin 11)    : %s\n", st.leds[LED_RED] ? "ON" : "OFF");
             (void)printf("  Buzzer (BCM 26, Pin 37)     : %s\n", st.leds[LED_BUZZER] ? "ON" : "OFF");
             (void)printf("  SW ScanStart (BCM 23, Pin 16): %s\n", st.sw[SW_SCAN_START] ? "PRESSED" : "RELEASED");
             (void)printf("  SW EMS (BCM 24, Pin 18)      : %s\n", st.sw[SW_EMS] ? "PRESSED" : "RELEASED");
