@@ -147,7 +147,7 @@ static void led_on_event(struct shared_ctx *ctx)
             (void)fprintf(stderr, "[led     ] SW_SCAN_START pressed -> CMD_SCAN_START trigger\n");
             if (ctx->req.valid == 0u) {
                 ctx->req.pan_start_ddeg   = 0;       /* 0.0 도 */
-                ctx->req.pan_end_ddeg     = 1800;    /* 180.0 도 */
+                ctx->req.pan_end_ddeg     = 1790;    /* 179.0 도 */
                 ctx->req.tilt_start_ddeg  = -900;    /* -90.0 도 */
                 ctx->req.tilt_end_ddeg    = 900;     /* +90.0 도 */
                 ctx->req.step_ddeg        = 10;      /* 1.0 도 격자 */

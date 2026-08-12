@@ -118,18 +118,16 @@ static struct platform_device *g_plat_dev = NULL;
 static void sw_poll_timer_handler(struct timer_list *t)
 {
 	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
-	int val_scan = 1, val_ems = 1;
 	u8 pressed_scan = 0, pressed_ems = 0;
 
 	if (gpio_is_valid(dev->pin_sw_scan_start)) {
-		val_scan = gpio_get_value(dev->pin_sw_scan_start);
-		pressed_scan = (val_scan == 0) ? 1 : 0;
+		pressed_scan = (gpio_get_value(dev->pin_sw_scan_start) == 0) ? 1 : 0;
 	}
 	
 	if (gpio_is_valid(dev->pin_sw_ems)) {
-		val_ems = gpio_get_value(dev->pin_sw_ems);
-		pressed_ems = (val_ems == 0) ? 1 : 0;
+		pressed_ems = (gpio_get_value(dev->pin_sw_ems) == 0) ? 1 : 0;
 	}
+
 
 	if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
 		dev->sw_state[SW_SCAN_START] = pressed_scan;
@@ -371,6 +369,39 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label)
 /* ---------------------------------------------------------------------------
  *  Platform Probe & Remove
  * ------------------------------------------------------------------------- */
+static void led_sw_teardown(void)
+{
+	if (g_led_sw) {
+		if (g_led_sw->buzzer_thread) {
+			kthread_stop(g_led_sw->buzzer_thread);
+			g_led_sw->buzzer_thread = NULL;
+		}
+
+		led_sw_del_timer_sync(&g_led_sw->poll_timer);
+
+		/* LED 및 부저 소등 후 해제 */
+		set_led_hw(g_led_sw, LED_GREEN, 0);
+		set_led_hw(g_led_sw, LED_YELLOW, 0);
+		set_led_hw(g_led_sw, LED_RED, 0);
+		set_led_hw(g_led_sw, LED_BUZZER, 0);
+
+		if (gpio_is_valid(g_led_sw->pin_sw_ems))
+			gpio_free(g_led_sw->pin_sw_ems);
+		if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
+			gpio_free(g_led_sw->pin_sw_scan_start);
+		if (gpio_is_valid(g_led_sw->pin_buzzer))
+			gpio_free(g_led_sw->pin_buzzer);
+		if (gpio_is_valid(g_led_sw->pin_led_red))
+			gpio_free(g_led_sw->pin_led_red);
+		if (gpio_is_valid(g_led_sw->pin_led_yellow))
+			gpio_free(g_led_sw->pin_led_yellow);
+		if (gpio_is_valid(g_led_sw->pin_led_green))
+			gpio_free(g_led_sw->pin_led_green);
+
+		g_led_sw = NULL;
+	}
+}
+
 static int led_sw_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -482,6 +513,8 @@ static int led_sw_probe(struct platform_device *pdev)
 	ret = misc_register(&g_led_sw->misc);
 	if (ret) {
 		pr_err("led_sw: misc_register result: %d\n", ret);
+		led_sw_teardown();
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, g_led_sw);
@@ -491,47 +524,26 @@ static int led_sw_probe(struct platform_device *pdev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static void led_sw_remove(struct platform_device *pdev)
-#else
-static int led_sw_remove(struct platform_device *pdev)
-#endif
 {
 	(void)pdev;
 	if (g_led_sw) {
 		misc_deregister(&g_led_sw->misc);
-
-		if (g_led_sw->buzzer_thread) {
-			kthread_stop(g_led_sw->buzzer_thread);
-			g_led_sw->buzzer_thread = NULL;
-		}
-
-		led_sw_del_timer_sync(&g_led_sw->poll_timer);
-
-		/* LED 및 부저 소등 후 해제 */
-		set_led_hw(g_led_sw, LED_GREEN, 0);
-		set_led_hw(g_led_sw, LED_YELLOW, 0);
-		set_led_hw(g_led_sw, LED_RED, 0);
-		set_led_hw(g_led_sw, LED_BUZZER, 0);
-
-		if (gpio_is_valid(g_led_sw->pin_sw_ems))
-			gpio_free(g_led_sw->pin_sw_ems);
-		if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
-			gpio_free(g_led_sw->pin_sw_scan_start);
-		if (gpio_is_valid(g_led_sw->pin_buzzer))
-			gpio_free(g_led_sw->pin_buzzer);
-		if (gpio_is_valid(g_led_sw->pin_led_red))
-			gpio_free(g_led_sw->pin_led_red);
-		if (gpio_is_valid(g_led_sw->pin_led_yellow))
-			gpio_free(g_led_sw->pin_led_yellow);
-		if (gpio_is_valid(g_led_sw->pin_led_green))
-			gpio_free(g_led_sw->pin_led_green);
-
-		g_led_sw = NULL;
+		led_sw_teardown();
 		pr_info("led_sw: driver removed\n");
 	}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	return 0;
-#endif
 }
+#else
+static int led_sw_remove(struct platform_device *pdev)
+{
+	(void)pdev;
+	if (g_led_sw) {
+		misc_deregister(&g_led_sw->misc);
+		led_sw_teardown();
+		pr_info("led_sw: driver removed\n");
+	}
+	return 0;
+}
+#endif
 
 static const struct of_device_id led_sw_of_match[] = {
 	{ .compatible = "adts,led-sw" },
