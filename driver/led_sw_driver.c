@@ -168,9 +168,12 @@ static int buzzer_kthread_func(void *data)
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
 			
-			/* 수동 부저 (Passive Buzzer) softTone 1kHz 톤 생성 (반주기 500us).
-			 * WiringPi 의 softToneWrite(pin, 1000) 과 동일한 방식. */
-			usleep_range(480, 520);
+			/* 수동 부저 (Passive Buzzer) 2kHz 정밀 톤 생성 (반주기 250us udelay).
+			 * usleep_range 는 커널 스케줄링 지터(1~4ms)로 인해 주파수가 100Hz 이하로 떨어져
+			 * 소리가 나지 않았음. udelay(250)으로 정밀 2kHz 톤 출력. */
+			udelay(250);
+			cond_resched();
+
 		} else {
 			gpio_set_value(dev->pin_buzzer, 0);
 			msleep(20);
