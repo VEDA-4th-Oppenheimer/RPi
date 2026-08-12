@@ -16,6 +16,7 @@ Module.symvers
 # ── 유저 앱 / 데몬 빌드 산출물 ──
 turret_test
 imu_test
+led_sw_test
 adts_daemon*
 build/
 build-arm64/
@@ -32,6 +33,13 @@ compile_commands.json
 .vscode/
 .DS_Store
 .claude
+.agents/
+# ⚠️ docs/ 는 무시하지 않는다. 개인 작업 메모를 무시하려다 들어왔는데,
+#   이 레포는 산출물(README·설계 문서)을 담아야 하므로 docs/ 를 통째로
+#   빼면 나중에 문서를 넣었을 때 조용히 커밋에서 빠진다.
+#   개인 메모는 .agents/ 나 scratch/ 처럼 개인용 이름을 쓸 것.
+
+
 
 # ── 🔐 인증서·키 (절대 커밋 금지) ──
 #  gen-certs.sh 가 만드는 산출물. 개인키가 레포에 들어가면 되돌릴 수 없다

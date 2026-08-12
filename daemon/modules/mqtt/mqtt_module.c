@@ -55,6 +55,12 @@
 #define T_CMD_STOP       "adts/cmd/stop"
 #define T_CMD_HOME       "adts/cmd/home"
 #define T_CMD_DISARM     "adts/cmd/disarm"
+/* ⚠️ rearm 은 아직 계약 문서(Confluence 31162383)에 **없다**. 계약 §5 표는
+ *   DISARM 상태에서 "복구" 버튼을 규정하는데 대응 토픽이 비어 있어, Qt 는
+ *   지금 로컬 상태만 되돌리고 데몬은 DISARM 에 남는 불일치가 있다.
+ *   여기서 먼저 구현해 두고 계약에 반영한다(이현우 협의 필요).
+ *   ACL 변경은 불필요 — 양쪽 다 adts/cmd/# 로 잡혀 있다. */
+#define T_CMD_REARM      "adts/cmd/rearm"
 #define T_ST_DAEMON      "adts/state/daemon"
 #define T_ST_SCAN        "adts/state/scan"
 #define T_EV_PROGRESS    "adts/event/progress"
@@ -104,6 +110,18 @@ static uint8_t   s_last_err_sent;
  * 숫자로 비교하면 손떨림 수준의 잡음에도 5초 주기가 무의미해질 만큼 발행이
  * 잦아진다. */
 static uint8_t   s_last_level_verdict;
+
+/* 방금 우리가 cmd/disarm 을 코어에 넘겼나.
+ *
+ * ★ 스캔이 정상 완료되면 코어가 되감기 유예(15초) 뒤 **스스로** DISARM 으로
+ *   내려간다. 그런데 예전에는 DISARM 전이를 무조건 오류로 발행해서, 성공한
+ *   스캔마다 "안전정지 진입"(code 100)이 하나씩 쌓였다. Qt 오류 로그가
+ *   정상 동작으로 가득 차면 진짜 오류를 못 찾는다.
+ *
+ *   전이 시점에 사유를 알려주는 필드가 shared_ctx 에 없어서, **우리가 보낸
+ *   요청은 우리가 기억한다.** 나머지 판정(링크 두절 / STM 오류)은 그 시점의
+ *   ctx 로 충분히 가려진다. */
+static bool      s_user_disarm;
 
 /* ---------------------------------------------------------------------------
  *  보조
@@ -238,7 +256,15 @@ static void publish_scan_result(const struct shared_ctx *ctx)
     publish_json(T_ST_SCAN, o, 1, true);                    /* retained */
 }
 
-static void publish_error(int code, const char *name, const char *msg)
+/* fatal = **작업이 중단됐고 사용자가 개입해야 다시 나간다.**
+ *
+ * "하드웨어가 고장났나" 가 아니라 **화면을 어떻게 그릴까**로 정의한다 —
+ * 그게 이 플래그를 쓰는 쪽(Qt)이 실제로 물어보는 질문이기 때문이다:
+ *     fatal=true   배너·모달로 크게. 조작을 막고 사용자를 부른다
+ *     fatal=false  로그 한 줄. 스캔은 계속되거나 다시 시도하면 된다
+ *
+ * (Qt 는 이 필드를 이미 파싱하고 있었는데 데몬이 안 채워 항상 false 였다) */
+static void publish_error(int code, const char *name, const char *msg, bool fatal)
 {
     cJSON *o = cJSON_CreateObject();
 
@@ -249,8 +275,27 @@ static void publish_error(int code, const char *name, const char *msg)
     (void)cJSON_AddNumberToObject(o, "code", code);
     (void)cJSON_AddStringToObject(o, "name", name);
     (void)cJSON_AddStringToObject(o, "msg",  msg);
+    (void)cJSON_AddBoolToObject  (o, "fatal", fatal);
     (void)cJSON_AddNumberToObject(o, "ts", (double)unix_ts());
     publish_json(T_EV_ERROR, o, 1, false);
+}
+
+/* STM 오류코드별 fatal 판정. 표는 MQTT 계약 문서 §3.5 와 같아야 한다. */
+static bool stm_err_is_fatal(uint8_t code)
+{
+    bool fatal;
+
+    switch (code) {
+    case 1:  /* ERR_BAD_CRC      — 프레임 하나가 깨진 것. 다음 프레임에 복구된다 */
+    case 2:  /* ERR_BAD_LEN                                                    */
+    case 4:  /* ERR_OUT_OF_RANGE — 입력값만 고치면 된다. 장비는 멀쩡하다        */
+        fatal = false;
+        break;
+    default: /* 3 NOT_HOMED / 5 STALL / 6 LIDAR — 스캔이 못 나간다 */
+        fatal = true;
+        break;
+    }
+    return fatal;
 }
 
 /* ---------------------------------------------------------------------------
@@ -306,7 +351,7 @@ static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
     if (!get_pair(o, "pan_ddeg", &p0, &p1) ||
         !get_pair(o, "tilt_ddeg", &t0, &t1) ||
         !get_int (o, "step_ddeg", &step)) {
-        publish_error(4, "ERR_OUT_OF_RANGE", "필수 필드 누락/형식 오류");
+        publish_error(4, "ERR_OUT_OF_RANGE", "필수 필드 누락/형식 오류", false);
         core_log(ctx->core, "MQTT", "cmd/scan 파싱 실패");
         return;
     }
@@ -364,13 +409,19 @@ static void on_message(struct mosquitto *m, void *user,
         core_log(ctx->core, "MQTT", "stop 요청 [%s]", s_req_id);
     } else if (strcmp(msg->topic, T_CMD_DISARM) == 0) {
         ctx->req_disarm = 1u;
+        s_user_disarm   = true;         /* 아래 mqtt_on_state 에서 사유 판정에 쓴다 */
         core_log(ctx->core, "MQTT", "disarm 요청 [%s]", s_req_id);
+    } else if (strcmp(msg->topic, T_CMD_REARM) == 0) {
+        /* 복구 가능 여부(링크 생존·현재 상태)는 코어가 판정한다. 여기서
+         * 미리 걸러내면 판정 기준이 두 곳으로 갈라진다. */
+        ctx->req_rearm = 1u;
+        core_log(ctx->core, "MQTT", "rearm 요청 [%s]", s_req_id);
     } else if (strcmp(msg->topic, T_CMD_HOME) == 0) {
-        /* 홈만 따로 거는 경로. 코어는 스캔 요청이 있을 때 자동으로 홈을 잡으므로
-         * 보통 불필요하지만, Qt 가 수동으로 확인하고 싶을 때를 위해 남긴다. */
-        ctx->req.valid = 0u;
-        core_log(ctx->core, "MQTT", "home 요청 [%s] — 코어가 스캔 전 자동 수행",
-                 s_req_id);
+        /* 스캔 없이 홈만 세운다. 코어는 스캔 직전에 어차피 홈을 다시 잡으므로
+         * 스캔 전에는 불필요하지만, 설치·정비 때 축을 홈 자세로 보내 눈으로
+         * 확인하는 용도로 쓴다. 수용 여부(IDLE 인가, 중복인가)는 코어가 본다. */
+        ctx->req_home = 1u;
+        core_log(ctx->core, "MQTT", "home 요청 [%s]", s_req_id);
     } else {
         core_log(ctx->core, "MQTT", "알 수 없는 토픽: %s", msg->topic);
     }
@@ -533,7 +584,8 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
 
     /* STM 오류가 새로 뜨면 이벤트로 알린다 (같은 코드 반복 발행 방지) */
     if ((ctx->link.last_err != 0u) && (ctx->link.last_err != s_last_err_sent)) {
-        publish_error(ctx->link.last_err, "STM_ERROR", "STM32 오류 통지");
+        publish_error(ctx->link.last_err, "STM_ERROR", "STM32 오류 통지",
+                      stm_err_is_fatal(ctx->link.last_err));
         s_last_err_sent = ctx->link.last_err;
     } else if (ctx->link.last_err == 0u) {
         s_last_err_sent = 0u;
@@ -557,9 +609,36 @@ static void mqtt_on_state(struct shared_ctx *ctx,
         /* 파일 마감은 코어가 EXPORT 진입 시 수행하므로 result 가 채워져 있다. */
         publish_scan_result(ctx);
     } else if (new_st == ST_DISARM) {
-        publish_error(ERRC_LINK_DEAD, "ERR_DISARM", "안전정지 진입");
+        /* ⚠️ 예전에는 여기서 무조건 오류를 발행했다. 스캔 후 자동 DISARM 이
+         *   생기면서 **성공한 스캔마다 오류가 하나씩** 나가게 됐다.
+         *   사유를 가려서, 알릴 가치가 있을 때만 보낸다. */
+        const bool user = s_user_disarm;
+        s_user_disarm = false;
+
+        if (ctx->link.link_alive == 0u) {
+            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+                          "링크 두절 — 배선/전원 확인", true);
+        } else if (ctx->link.last_err != 0u) {
+            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+                          "STM32 오류로 안전정지", true);
+        } else if (user) {
+            /* 사용자가 직접 눌렀다. 장비가 고장난 건 아니지만 **REARM 전까지
+             * 스캔이 안 나가므로** fatal 이다(위 정의 참조). 여러 콘솔이 붙어
+             * 있을 수 있어 "누가 세웠다" 도 남겨야 한다.
+             * 이름은 Qt 데모 브리지와 맞춘다 — 같은 사건이 실물/데모에서
+             * 다르게 보이면 UI 를 두 번 만들게 된다. */
+            publish_error(ERRC_LINK_DEAD, "USER_DISARM",
+                          "사용자 안전정지", true);
+        } else {
+            /* 스캔 후 되감기 유예 뒤의 자동 DISARM = 정상 종료.
+             * state/daemon 전이만으로 충분하고 오류가 아니다. */
+            core_log(ctx->core, "MQTT", "자동 DISARM (정상) — 오류 발행 안 함");
+        }
     } else {
         /* 그 외 전이는 상태 발행으로 충분 */
+        if (new_st == ST_IDLE) {
+            s_user_disarm = false;      /* rearm 등으로 빠져나왔다 — 표식 정리 */
+        }
     }
 }
 
