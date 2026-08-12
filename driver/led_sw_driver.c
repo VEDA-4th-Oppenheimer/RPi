@@ -4,8 +4,8 @@
  *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
  *
  *  하드웨어 구성:
- *    - LED_초록 (Green)  : 명령코드 중 제어코드 동작 중 (GPIO 17 기본값)
- *    - LED_노랑 (Yellow) : 명령 대기 중                 (GPIO 27 기본값)
+ *    - LED_초록 (Green)  : 명령코드 중 제어코드 동작 중 (GPIO 27 기본값, Pin 11에 연결)
+ *    - LED_노랑 (Yellow) : 명령 대기 중                 (GPIO 17 기본값, Pin 13에 연결)
  *    - LED_빨강 (Red)    : 에러(코드) 발생              (GPIO 22 기본값)
  *    - 스위치_scan_start : 스캔 시작 CMD_SCAN_START     (GPIO 23 기본값, IRQ)
  *    - 스위치_ems        : 즉시 정지 CMD_DISARM         (GPIO 24 기본값, IRQ)
@@ -53,18 +53,18 @@ MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
 MODULE_VERSION("1.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 17;
-static int gpio_yellow     = 27;
+static int gpio_green      = 27;
+static int gpio_yellow     = 17;
 static int gpio_red        = 22;
 static int gpio_buzzer     = 26;
 static int gpio_scan_start = 23;
 static int gpio_ems        = 24;
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 17)");
 
 module_param(gpio_red, int, 0444);
 MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
