@@ -39,6 +39,13 @@ else BOOTCFG=""; fi
 
 say() { echo "── $*"; }
 
+# ⚠️ 상주 서비스가 /dev/turret 을 쥐고 있으면 모듈을 못 내린다. 먼저 멈춘다.
+#   (마지막에 다시 켠다 — --no-start 면 안 켠다)
+if systemctl is-active --quiet adts-daemon 2>/dev/null; then
+    say "실행 중인 adts-daemon 정지 (모듈 교체를 위해)"
+    systemctl stop adts-daemon
+fi
+
 # ── 1. 데몬 바이너리 ────────────────────────────────────────────────────────
 BIN=""
 for c in "$REPO/daemon/build/adts_daemon" "$REPO/daemon/adts_daemon" "$REPO/adts_daemon"; do
@@ -69,6 +76,35 @@ if [ "$DAEMON_ONLY" -eq 0 ]; then
         say "자동 적재 등록: /etc/modules-load.d/adts.conf"
         : > /etc/modules-load.d/adts.conf
         for m in $MODS; do echo "$m" >> /etc/modules-load.d/adts.conf; done
+
+        # ★ 지금 커널에도 반영한다.
+        #
+        #   modules-load.d 는 **부팅 때만** 읽힌다. 복사만 하고 끝내면
+        #   지금 돌고 있는 것은 여전히 옛 모듈이라, /dev/turret 의 권한이나
+        #   동작이 새 .ko 와 다른 채로 남는다. 실제로 이것 때문에 데몬이
+        #   "open /dev/turret 실패 (Permission denied)" 로 degraded 로 떴다.
+        #
+        #   내리고 다시 올린다. 사용 중이라 못 내리면 재부팅을 안내한다 —
+        #   조용히 넘어가면 "설치했는데 왜 그대로지" 가 된다.
+        say "모듈 적재 갱신"
+        NEED_REBOOT=0
+        for m in $MODS; do
+            if lsmod | awk '{print $1}' | grep -qx "$m"; then
+                if rmmod "$m" 2>/dev/null; then
+                    echo "   $m: 옛 모듈 내림"
+                else
+                    echo "   ⚠ $m: 사용 중이라 못 내림 — 새 .ko 는 재부팅 후 적용"
+                    NEED_REBOOT=1
+                    continue
+                fi
+            fi
+            if modprobe "$m" 2>/dev/null; then
+                echo "   $m: 적재됨"
+            else
+                echo "   ⚠ $m: 적재 실패 — dmesg 확인"
+                NEED_REBOOT=1
+            fi
+        done
     else
         echo "⚠ driver/*.ko 가 없다 — 모듈 설치를 건너뛴다 (make rpi 로 빌드)"
     fi
@@ -112,6 +148,16 @@ for f in /etc/adts/certs/ca.crt /etc/adts/certs/daemon.crt /etc/adts/certs/daemo
     fi
 done
 
+# 유닛의 ExecStartPre 가 /dev/turret 을 기다리다 실패하는 일이 잦아, 켜기 전에
+# 미리 보여준다. 없으면 오버레이(dtoverlay=turret-overlay) 미적용이 1순위다.
+for d in /dev/turret /dev/imu /dev/led_sw; do
+    if [ -e "$d" ]; then
+        echo "   $(ls -l "$d")"
+    else
+        echo "   ⚠ $d 없음 — 오버레이 적용/모듈 probe 확인 (dmesg)"
+    fi
+done
+
 if [ "$NO_START" -eq 1 ]; then
     say "설치만 완료 (--no-start). 시작: sudo systemctl enable --now adts-daemon"
 else
@@ -134,3 +180,8 @@ cat <<EOF
     (scan_batch.sh 도 마찬가지)
   · config.txt 에 dtoverlay 를 새로 넣었으면 재부팅해야 적용된다.
 EOF
+
+if [ "${NEED_REBOOT:-0}" -eq 1 ]; then
+    echo
+    echo "⚠️ 일부 모듈을 교체하지 못했다. 재부팅해야 새 .ko 가 적용된다: sudo reboot"
+fi
