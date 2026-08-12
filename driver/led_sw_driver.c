@@ -180,8 +180,11 @@ static int buzzer_kthread_func(void *data)
 					 dev->pin_buzzer);
 				last_print = jiffies;
 			}
-			/* 약 400Hz 주파수 (반주기 1.25ms). CPU 양보를 위해 usleep_range 사용 */
-			usleep_range(1200, 1300);
+			/* 패시브 피에조 부저 공진 주파수 (~2.7kHz, 반주기 185us).
+			 * 기존 1.25ms(400Hz)는 공진 범위를 벗어나 소리가 안 들리거나 극히 작았음.
+			 * test_buzzer.py 의 4kHz~2.7kHz 공진 대역에 맞춤. */
+			usleep_range(180, 200);
+
 		} else {
 			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
 			msleep(20);
