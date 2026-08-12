@@ -53,18 +53,19 @@ MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
 MODULE_VERSION("1.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 27;
-static int gpio_yellow     = 17;
+static int gpio_green      = 17;
+static int gpio_yellow     = 27;
 static int gpio_red        = 22;
 static int gpio_buzzer     = 26;
 static int gpio_scan_start = 23;
 static int gpio_ems        = 24;
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 17)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
+
 
 module_param(gpio_red, int, 0444);
 MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
