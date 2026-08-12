@@ -4,8 +4,8 @@
  *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
  *
  *  하드웨어 구성:
- *    - LED_초록 (Green)  : 명령코드 중 제어코드 동작 중 (GPIO 17 기본값)
- *    - LED_노랑 (Yellow) : 명령 대기 중                 (GPIO 27 기본값)
+ *    - LED_초록 (Green)  : 명령코드 중 제어코드 동작 중 (GPIO 27 기본값, Pin 11에 연결)
+ *    - LED_노랑 (Yellow) : 명령 대기 중                 (GPIO 17 기본값, Pin 13에 연결)
  *    - LED_빨강 (Red)    : 에러(코드) 발생              (GPIO 22 기본값)
  *    - 스위치_scan_start : 스캔 시작 CMD_SCAN_START     (GPIO 23 기본값, IRQ)
  *    - 스위치_ems        : 즉시 정지 CMD_DISARM         (GPIO 24 기본값, IRQ)
@@ -53,21 +53,22 @@ MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
 MODULE_VERSION("1.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 17;
-static int gpio_yellow     = 27;
-static int gpio_red        = 22;
-static int gpio_buzzer     = 26;
-static int gpio_scan_start = 23;
-static int gpio_ems        = 24;
+static int gpio_green      = 27;  /* Physical Pin 13 (Green LED) */
+static int gpio_yellow     = 22;  /* Physical Pin 15 (Yellow LED) */
+static int gpio_red        = 17;  /* Physical Pin 11 (Red LED) */
+static int gpio_buzzer     = 26;  /* Physical Pin 37 (Buzzer) */
+static int gpio_scan_start = 23;  /* Physical Pin 16 (Scan Start Sw) */
+static int gpio_ems        = 24;  /* Physical Pin 18 (EMS Sw) */
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 22)");
 
 module_param(gpio_red, int, 0444);
-MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
+MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 17)");
+
 
 module_param(gpio_scan_start, int, 0444);
 MODULE_PARM_DESC(gpio_scan_start, "GPIO pin for Scan Start Switch (default: 23)");
@@ -162,30 +163,21 @@ static void sw_poll_timer_handler(struct timer_list *t)
 static int buzzer_kthread_func(void *data)
 {
 	struct led_sw_dev *dev = data;
-	unsigned long last_print = jiffies;
 
 	while (!kthread_should_stop()) {
 		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
 			dev->buzzer_toggle = !dev->buzzer_toggle;
 			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
 			
-			/* pr_info 였는데 낮춘다. 울리는 동안 초당 1줄이 쌓이는데,
-			 * 커널 링버퍼가 주기 로그로 차면 정작 봐야 할 메시지(다른
-			 * 드라이버의 probe 실패 등)가 밀려난다 — turret 드라이버의
-			 * TX 덤프가 IMU 진단을 가렸던 것과 같은 문제다.
-			 *   echo 'file led_sw_driver.c +p' > \
-			 *     /sys/kernel/debug/dynamic_debug/control */
-			if (time_after(jiffies, last_print + HZ)) {
-				pr_debug("led_sw: buzzer active, toggling pin %d\n",
-					 dev->pin_buzzer);
-				last_print = jiffies;
-			}
-			/* 약 400Hz 주파수 (반주기 1.25ms). CPU 양보를 위해 usleep_range 사용 */
-			usleep_range(1200, 1300);
+			/* 수동 부저 (Passive Buzzer) 2kHz 정밀 톤 생성 (반주기 250us udelay).
+			 * usleep_range 는 커널 스케줄링 지터(1~4ms)로 인해 주파수가 100Hz 이하로 떨어져
+			 * 소리가 나지 않았음. udelay(250)으로 정밀 2kHz 톤 출력. */
+			udelay(250);
+			cond_resched();
+
 		} else {
-			/* 꺼져 있을 때는 CPU 점유율을 낮추기 위해 대기 */
+			gpio_set_value(dev->pin_buzzer, 0);
 			msleep(20);
-			last_print = jiffies;
 		}
 	}
 	return 0;
@@ -209,6 +201,8 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 	case LED_RED:
 		pin = dev->pin_led_red;
 		break;
+
+
 	case LED_BUZZER:
 		if (on != dev->led_state[LED_BUZZER]) {
 			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
@@ -216,10 +210,11 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 				gpio_set_value(dev->pin_buzzer, 0);
 			}
 		}
-		return; /* 부저는 kthread가 led_state를 폴링하므로 로직 스킵 */
+		return; /* 수동 부저는 kthread가 led_state를 폴링하며 1kHz 펄스를 생성함 */
 	default:
 		return;
 	}
+
 
 	if (gpio_is_valid(pin)) {
 		gpio_set_value(pin, on);

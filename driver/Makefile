@@ -58,7 +58,8 @@ PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $
 # ── 타겟 ──
 .PHONY: all rpi modules clean dtbo
 
-all: modules turret_test imu_test led_sw_test
+all: dtbo modules turret_test imu_test led_sw_test
+
 
 # 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + 유저 앱 전부 arm64
 rpi:
