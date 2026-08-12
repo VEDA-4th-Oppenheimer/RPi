@@ -55,6 +55,12 @@
 #define T_CMD_STOP       "adts/cmd/stop"
 #define T_CMD_HOME       "adts/cmd/home"
 #define T_CMD_DISARM     "adts/cmd/disarm"
+/* ⚠️ rearm 은 아직 계약 문서(Confluence 31162383)에 **없다**. 계약 §5 표는
+ *   DISARM 상태에서 "복구" 버튼을 규정하는데 대응 토픽이 비어 있어, Qt 는
+ *   지금 로컬 상태만 되돌리고 데몬은 DISARM 에 남는 불일치가 있다.
+ *   여기서 먼저 구현해 두고 계약에 반영한다(이현우 협의 필요).
+ *   ACL 변경은 불필요 — 양쪽 다 adts/cmd/# 로 잡혀 있다. */
+#define T_CMD_REARM      "adts/cmd/rearm"
 #define T_ST_DAEMON      "adts/state/daemon"
 #define T_ST_SCAN        "adts/state/scan"
 #define T_EV_PROGRESS    "adts/event/progress"
@@ -365,12 +371,17 @@ static void on_message(struct mosquitto *m, void *user,
     } else if (strcmp(msg->topic, T_CMD_DISARM) == 0) {
         ctx->req_disarm = 1u;
         core_log(ctx->core, "MQTT", "disarm 요청 [%s]", s_req_id);
+    } else if (strcmp(msg->topic, T_CMD_REARM) == 0) {
+        /* 복구 가능 여부(링크 생존·현재 상태)는 코어가 판정한다. 여기서
+         * 미리 걸러내면 판정 기준이 두 곳으로 갈라진다. */
+        ctx->req_rearm = 1u;
+        core_log(ctx->core, "MQTT", "rearm 요청 [%s]", s_req_id);
     } else if (strcmp(msg->topic, T_CMD_HOME) == 0) {
-        /* 홈만 따로 거는 경로. 코어는 스캔 요청이 있을 때 자동으로 홈을 잡으므로
-         * 보통 불필요하지만, Qt 가 수동으로 확인하고 싶을 때를 위해 남긴다. */
-        ctx->req.valid = 0u;
-        core_log(ctx->core, "MQTT", "home 요청 [%s] — 코어가 스캔 전 자동 수행",
-                 s_req_id);
+        /* 스캔 없이 홈만 세운다. 코어는 스캔 직전에 어차피 홈을 다시 잡으므로
+         * 스캔 전에는 불필요하지만, 설치·정비 때 축을 홈 자세로 보내 눈으로
+         * 확인하는 용도로 쓴다. 수용 여부(IDLE 인가, 중복인가)는 코어가 본다. */
+        ctx->req_home = 1u;
+        core_log(ctx->core, "MQTT", "home 요청 [%s]", s_req_id);
     } else {
         core_log(ctx->core, "MQTT", "알 수 없는 토픽: %s", msg->topic);
     }

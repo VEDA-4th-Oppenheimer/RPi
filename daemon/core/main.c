@@ -71,11 +71,25 @@ struct core {
     uint64_t hb_last_pong;     /* 마지막 PONG 관측 시각(mono ms)    */
     bool     hb_primed;        /* 최초 GET_STATE 로 기준선 설정 여부 */
 
+    /* 마지막으로 **로그에 찍은** STM 에러코드. 드라이버가 주는 last_err 는
+     * 다음 성공까지 값이 유지되므로, 그대로 찍으면 100ms tick 마다 같은 줄이
+     * 초당 10회 쌓인다. 값이 바뀔 때만 찍기 위한 에지 검출용이다. */
+    uint8_t  last_err_seen;
 
     /* 스캔 전 자동 홈. STM 은 홈 전 SCAN_START 를 ERR_NOT_HOMED 로 거절하므로
      * 요청이 들어오면 먼저 홈을 세우고 STF_HOMED 를 기다린다. */
     uint64_t home_req_first_ms;   /* 첫 요청 시각 (0 = 요청 안 함)  */
     uint64_t home_req_last_ms;    /* 마지막 송신 시각 (재시도 간격) */
+
+    /* cmd/home 으로 들어온 **단독** 홈이 진행 중인가. 스캔 전 자동 홈과 같은
+     * 대기 로직(core_await_home)을 쓰지만, 끝났을 때 스캔으로 넘어가지 않고
+     * IDLE 에 그대로 머문다는 점만 다르다. */
+    bool     home_manual;
+
+    /* 스캔 완료 후 자동 DISARM 예약. 0 = 예약 없음, 그 외 = EXPORT 를 빠져나온
+     * 시각(mono ms). 이 시각 + POST_SCAN_DISARM_MS 가 지나면 DISARM 으로 간다.
+     * 지연을 두는 이유는 POST_SCAN_DISARM_MS 주석 참조. */
+    uint64_t auto_disarm_at_ms;
 
     /* 스캔 산출물 핸들. NULL 이면 스캔 중 아님.
      * 격자·통계·경로는 전부 scan_output.c 안에 있다 — 예전엔 그 15개 필드가
@@ -100,6 +114,10 @@ struct core {
      *   비상 정지(link_dead / CMD_ERROR / SIGTERM)는 이 플래그가 false 라
      *   기존대로 DISARM 이 나간다. */
     bool     clean_exit;
+    /* --once 로 돌 때 스캔이 실제로 산출까지 갔는지. 배치 스크립트가 종료코드
+     * 하나로 성공/실패를 가릴 수 있게 한다 — 한국어 로그를 grep 하게 만들면
+     * 문구를 바꿀 때마다 스크립트가 조용히 깨진다. */
+    bool     scan_failed;
 
     /* 무입력 타임아웃 (SCAN_DONE 유실 대비 안전망) */
     uint64_t last_point_ms;        /* 마지막 점 수신 시각 */
@@ -128,6 +146,25 @@ struct core {
  *   (STM 쪽은 홈 절차 중 들어온 CMD_HOME 재시도를 무시한다 — 안 그러면
  *    500ms 마다 정착 대기가 처음부터 다시 시작돼 영영 안 끝난다) */
 #define HOME_TIMEOUT_MS       20000u
+
+/* 스캔 완료 후 자동 DISARM 까지의 유예(ms).
+ *
+ * 스캔이 끝나면 킷을 안전 상태로 두는 편이 낫다 — IDLE 로 두면 스텝이 계속
+ * 여자된 채 방치되고, 조작자는 화면만 보고 "끝난 건지 대기 중인지" 를 가릴 수
+ * 없다. 그래서 EXPORT 를 지나면 DISARM 으로 내린다.
+ *
+ * ⚠️ **곧바로 보내면 안 된다.** STM32 는 CMD_SCAN_DONE 을 올린 **뒤** 케이블
+ *   되감기(역회전)를 스스로 수행하는데, CMD_DISARM 은 그 시퀀스를 즉시
+ *   중단시킨다. 축이 시작 각도로 못 돌아오고 라이다 케이블이 감긴 채 남아
+ *   다음 스캔이 불가능해진다. 되감기가 끝나면 STM32 가 스스로 PWM 을 끄므로,
+ *   그때까지 기다렸다가 보내는 DISARM 은 안전 재확인이지 방해가 아니다.
+ *
+ * ⚠️ 이 값은 **되감기 실측 전까지의 잠정치**다. 프로토콜 v5 에 "되감기 완료"
+ *   통지가 없어서(STM 은 CMD_STATUS 를 주기 발행하지 않는다) 시간으로 때우는
+ *   수밖에 없다. 홈 이동 최악치(팬 180도 @22.5도/s ≈ 8초)에 여유를 더해 잡았다.
+ *   실측 후 조정하거나, 펌웨어에 완료 통지를 추가하면 그걸로 갈아탈 것.
+ *   짧으면 되감기가 끊기고, 길면 그동안 스텝이 여자된 채 남는다. */
+#define POST_SCAN_DISARM_MS   15000u
 
 /* ---------------------------------------------------------------------------
  *  파일 디스크립터 헬퍼 (C: RAII 없음 → 명시 관리)
@@ -377,8 +414,26 @@ static void core_read_state(struct core *c)
         core_transition(c, ST_DISARM);
         return;
     }
+    /* ⚠️ 예전에는 이 로그가 `state == ST_SCANNING` 안에 갇혀 있었다. 그런데
+     *   홈 대기 중 상태는 ST_IDLE 이라, STM 이 홈 도중 올린 ERR_NOT_HOMED
+     *   (엔코더 I2C 판독 실패) / ERR_STALL(홈 수렴 실패) 이 last_err 에 담기기만
+     *   하고 아무 데도 안 찍혔다. 데몬 화면에는 20초 침묵 뒤 "홈 무응답" 만
+     *   남아서, 실제로는 STM 이 또렷하게 이유를 말했는데도 링크 문제로 오해했다.
+     *
+     *   그래서 **보고(어느 상태에서든)와 DISARM(스캔 중에만)을 분리**한다.
+     *   IDLE 에서의 에러는 요청 거절이지 비상정지가 아니므로 전이하지 않는다.
+     *
+     *   같은 코드가 매 tick(100ms) 반복 출력되지 않도록 값이 바뀔 때만 찍는다.
+     *   STM 은 last_err 를 다음 성공까지 유지하므로 그러지 않으면 초당 10줄이다. */
+    if (st.last_err != c->last_err_seen) {
+        c->last_err_seen = st.last_err;
+        if (st.last_err != ERR_NONE) {
+            core_log(c, "STM", "CMD_ERROR code=%u (state=%s)",
+                     st.last_err, daemon_state_str(c->ctx.state));
+        }
+    }
     if (st.last_err != ERR_NONE && c->ctx.state == ST_SCANNING) {
-        core_log(c, "STM", "CMD_ERROR code=%u -> DISARM", st.last_err);
+        core_log(c, "STM", "스캔 중 오류 -> DISARM");
         core_transition(c, ST_DISARM);
     }
 }
@@ -432,15 +487,18 @@ static bool core_await_home(struct core *c)
         if (ioctl(c->turret_fd, TURRET_HOME) < 0) {
             core_log(c, "HOME", "TURRET_HOME ioctl 실패: %s", strerror(errno));
         } else {
-            core_log(c, "HOME", "스캔 전 홈 확립 요청 (CMD_HOME)");
+            core_log(c, "HOME", "%s 홈 확립 요청 (CMD_HOME)",
+                     c->home_manual ? "단독" : "스캔 전");
         }
     } else if (c->ctx.link.homed != 0u) {
         waiting = false;                   /* 이번 HOME 에 대한 응답 도착 */
     } else if ((now - c->home_req_first_ms) > HOME_TIMEOUT_MS) {
         core_log(c, "HOME",
-                 "홈 무응답 %ums — 스캔 요청 취소 (링크/펌웨어 확인)",
+                 "홈 무응답 %ums — 요청 취소 (링크/펌웨어 확인)",
                  HOME_TIMEOUT_MS);
-        c->ctx.req.valid = 0u;             /* 요청 폐기 */
+        /* 스캔 대기 중이었다면 그 요청도 함께 버린다. 단독 홈(req_home)이면
+         * 이미 0 이라 무해하다. 성공/실패 구분은 호출자가 link.homed 로 한다. */
+        c->ctx.req.valid = 0u;
         waiting = false;
     } else if ((now - c->home_req_last_ms) >= HOME_RETRY_MS) {
         c->home_req_last_ms = now;
@@ -451,10 +509,55 @@ static bool core_await_home(struct core *c)
     return waiting;
 }
 
+/* DISARM -> IDLE 복구(REARM).
+ *
+ * ★ 모터 재인가 명령은 보내지 않는다. protocol v5 에 CMD_ARM 이 없고, STM 은
+ *   다음 HOME/SCAN_START 에서 스텝을 다시 켠다. 데몬은 스캔 직전에 항상 홈을
+ *   다시 잡으므로(core_await_home), 복구는 데몬 상태만 되돌리면 충분하다.
+ *   ⚠️ 즉 REARM 직후의 축 위치는 여전히 미지다 — "다시 스캔을 걸 수 있는
+ *     상태" 로 돌아갈 뿐, 물리적으로 홈에 선 것이 아니다.
+ *
+ * ★ 링크가 죽어 있으면 거부한다. 그 상태로 IDLE 로 올려봐야 다음 tick 의
+ *   heartbeat 판정(core_read_state)이 곧바로 다시 DISARM 으로 떨어뜨린다.
+ *   그 왕복은 retained 상태 발행으로 그대로 나가 Qt 화면만 깜빡이고, 조작자는
+ *   "복구가 왜 안 되는지" 를 읽을 수 없다. 여기서 이유를 로그로 남기고 막는다.
+ *   (link_alive 는 DISARM 중에도 매 tick 갱신되므로 STM 이 돌아오면 저절로
+ *    통과한다 — 데몬 재시작이 필요하지 않다) */
+static void core_rearm(struct core *c)
+{
+    if (c->ctx.state != ST_DISARM) {
+        core_log(c, "REARM", "%s 상태 — 무시 (DISARM 에서만 복구)",
+                 daemon_state_str(c->ctx.state));
+        return;
+    }
+    if ((c->turret_fd >= 0) && (c->ctx.link.link_alive == 0u)) {
+        core_log(c, "REARM", "링크 단절 중 — 복구 거부 (STM32/UART 확인)");
+        return;
+    }
+
+    /* 대기 중이던 스캔 요청을 버린다. DISARM 직전에 들어와 있던 요청을 그대로
+     * 두면 복구하자마자 조작자가 시키지도 않은 스캔이 시작된다 — 비상정지를
+     * 누른 사람이 가장 원하지 않는 동작이다. */
+    c->ctx.req.valid     = 0u;
+    c->ctx.req_scan_stop = 0u;
+    c->home_manual       = false;   /* 홈 대기 중 정지했을 수 있다 */
+    c->home_req_first_ms = 0u;
+    c->home_req_last_ms  = 0u;
+
+    core_log(c, "REARM", "DISARM 해제 — IDLE 복귀 (스캔은 다시 요청해야 한다)");
+    core_transition(c, ST_IDLE);
+}
+
 static void core_eval_state(struct core *c)
 {
     switch (c->ctx.state) {
     case ST_IDLE:
+        /* 새 작업이 들어오면 예약된 자동 DISARM 을 취소한다. 조작자가 킷을
+         * 계속 쓰는 중인데 유예가 끝났다고 안전정지로 떨어지면, 다음 스캔이
+         * 갑자기 거절되고 왜 그런지도 화면에 안 나온다. */
+        if ((c->ctx.req.valid != 0u) || c->home_manual) {
+            c->auto_disarm_at_ms = 0u;
+        }
         if (c->ctx.req.valid != 0u) {                 /* MQTT scan/start 수신 */
             /* turret 이 있으면 스캔 전에 항상 홈을 다시 잡는다(위 주석 참조).
              * 대기 중에는 요청을 소비하지 않고 다음 tick 에 다시 본다 —
@@ -469,8 +572,50 @@ static void core_eval_state(struct core *c)
                 if (!cancelled) {
                     c->ctx.req.valid = 0u;            /* 요청 소비 */
                     core_transition(c, ST_SCANNING);
+                } else if (c->exit_after_scan) {
+                    /* ⚠️ 홈 무응답·수평 NG 로 요청이 버려졌다. 예전에는 여기서
+                     *   아무것도 안 해서 --once 데몬이 **영원히 살아 있었다.**
+                     *   스캔은 영영 안 오는데 프로세스는 안 죽으니, 배치로
+                     *   돌리면 첫 실패에서 통째로 멈춘다. 종료한다. */
+                    core_log(c, "CLI", "--once: 스캔 요청이 취소됨 → 실패 종료");
+                    c->scan_failed = true;
+                    c->clean_exit  = true;
+                    c->running     = false;
+                } else {
+                    /* 상주 모드면 다음 요청을 계속 기다린다 */
                 }
             }
+        } else if (c->home_manual) {
+            /* cmd/home 으로 들어온 단독 홈. 대기 로직은 스캔 전 자동 홈과
+             * 완전히 같고, 끝난 뒤 SCANNING 으로 넘어가지 않는 것만 다르다.
+             *
+             * 스캔 요청이 나중에 겹쳐 들어오면 위 분기가 우선권을 갖는데,
+             * home_req_* 를 그대로 물려받으므로 진행 중이던 홈이 취소되거나
+             * 처음부터 다시 시작되지 않는다 — 그대로 이어서 기다렸다가
+             * 홈이 서면 스캔으로 넘어간다. */
+            if ((c->turret_fd >= 0) && core_await_home(c)) {
+                /* 홈 대기 중 */
+            } else {
+                const bool homed = (c->ctx.link.homed != 0u);
+
+                c->home_manual       = false;
+                c->home_req_first_ms = 0u;
+                c->home_req_last_ms  = 0u;
+                if (c->turret_fd < 0) {
+                    core_log(c, "HOME", "degraded — turret 없이 홈 생략");
+                } else {
+                    core_log(c, "HOME", "단독 홈 %s", homed ? "완료" : "실패");
+                }
+            }
+        } else if ((c->auto_disarm_at_ms != 0u)
+                   && (mono_ms() >= c->auto_disarm_at_ms)) {
+            /* 스캔 후 되감기 유예가 끝났다 — 안전 상태로 내린다.
+             * 다시 스캔하려면 조작자가 REARM 을 눌러야 한다(cmd/rearm). */
+            c->auto_disarm_at_ms = 0u;
+            core_log(c, "SCAN", "되감기 유예 종료 — 자동 DISARM");
+            core_transition(c, ST_DISARM);
+        } else {
+            /* 요청 없음 — 대기 */
         }
         break;
 
@@ -524,6 +669,13 @@ static void core_eval_state(struct core *c)
             core_log(c, "CLI", "--once: 스캔 완료 → 종료 (STM32 되감기 진행 중)");
             c->clean_exit = true;
             c->running    = false;
+        } else {
+            /* 되감기가 끝날 때까지 기다렸다가 자동으로 안전 상태로 내린다.
+             * degraded(turret 없음)에서도 상태는 똑같이 움직인다 — 실제
+             * CMD_DISARM 송신만 core_transition 이 막는다. */
+            c->auto_disarm_at_ms = mono_ms() + POST_SCAN_DISARM_MS;
+            core_log(c, "SCAN", "스캔 완료 — %u초 후 자동 DISARM (되감기 대기)",
+                     POST_SCAN_DISARM_MS / 1000u);
         }
         break;
 
@@ -573,6 +725,12 @@ static void core_transition(struct core *c, daemon_state_t want)
             (void)ioctl(c->turret_fd, TURRET_DISARM);
         }
         scan_out_close(&c->out);              /* 스캔 중이었으면 파일 마감 */
+        /* 홈 대기 중 정지했을 수 있다. 안 지우면 복구 후 IDLE 로 돌아온
+         * 순간 취소된 홈이 되살아난다. */
+        c->home_manual       = false;
+        c->home_req_first_ms = 0u;
+        c->home_req_last_ms  = 0u;
+        c->auto_disarm_at_ms = 0u;      /* 이미 DISARM — 예약은 의미 없다 */
     }
 
     c->ctx.state = want;
@@ -663,9 +821,31 @@ static void core_tick(struct core *c)
 
     core_poll_link(c);           /* STM 링크 캐시 + heartbeat 판정 */
 
+    /* ⚠️ 복구를 정지보다 **먼저** 소비한다. 같은 tick 에 둘 다 서면(예: 조작자가
+     *   REARM 을 누른 직후 링크가 끊겨 자동 정지가 걸린 경우) 나중에 처리되는
+     *   쪽이 최종 상태가 되므로, 안전정지가 항상 이기도록 순서를 고정한다. */
+    if (c->ctx.req_rearm != 0u) {           /* DISARM 해제 요청 */
+        c->ctx.req_rearm = 0u;
+        core_rearm(c);
+    }
     if (c->ctx.req_disarm != 0u) {          /* 모듈이 정지 요청 */
         c->ctx.req_disarm = 0u;
         core_transition(c, ST_DISARM);
+    }
+    if (c->ctx.req_home != 0u) {            /* cmd/home — 스캔 없이 홈만 */
+        c->ctx.req_home = 0u;
+        if (c->ctx.state != ST_IDLE) {
+            core_log(c, "HOME", "%s 상태 — 단독 홈 무시 (IDLE 에서만)",
+                     daemon_state_str(c->ctx.state));
+        } else if (c->turret_fd < 0) {
+            core_log(c, "HOME", "turret 미연결(degraded) — 단독 홈 무시");
+        } else if (c->home_manual || (c->ctx.req.valid != 0u)) {
+            /* 이미 홈이 돌고 있거나 스캔이 곧 홈을 잡는다. 여기서 다시 걸면
+             * home_req_* 가 리셋돼 20초 타임아웃이 처음부터 다시 시작된다. */
+            core_log(c, "HOME", "이미 홈 진행 중 — 중복 요청 무시");
+        } else {
+            c->home_manual = true;          /* core_eval_state 가 수행 */
+        }
     }
     if (c->ctx.req_scan_stop != 0u) {       /* 사용자 stop */
         c->ctx.req_scan_stop = 0u;
@@ -903,5 +1083,7 @@ int main(int argc, char **argv)
 
     core_run(&core);
     core_shutdown(&core);
-    return 0;
+    /* 스캔이 취소된 채 --once 로 끝났으면 실패로 알린다. 배치 스크립트가
+     * 로그를 grep 하지 않고 종료코드만 보면 되도록. */
+    return core.scan_failed ? 1 : 0;
 }

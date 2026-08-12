@@ -1,0 +1,88 @@
+# =============================================================================
+#  adts-daemon.service — 스캐너 통합 데몬 (상주, MQTT 트리거 대기)
+#
+#  배치: sudo bash daemon/tools/install-service.sh
+#        (수동이면 아래 [Install] 아래 주석 참조)
+#
+#  ⚠️ 선행 조건 두 가지. 안 하면 부팅 시 데몬이 degraded 로 뜨거나 아예 실패한다.
+#    ① 커널 모듈 자동 적재  — /etc/modules-load.d/adts.conf
+#    ② 오버레이 자동 적용   — /boot/firmware/config.txt 의 dtoverlay=
+#    설치 스크립트가 둘 다 해준다.
+# =============================================================================
+[Unit]
+Description=ADTS 2-axis LiDAR scanner daemon
+Documentation=https://lkj000619.atlassian.net/wiki/spaces/VPT
+
+# 브로커가 먼저 떠 있어야 첫 접속이 붙는다. 늦게 떠도 mqtt_module 이 재접속을
+# 계속 시도하므로 치명적이진 않지만, 부팅 로그가 깨끗해진다.
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ⚠️ root 로 돌리지 않는다. /dev/turret · /dev/imu · /dev/led_sw 가 0666 이고
+#   인증서도 pi 가 읽을 수 있으면 되므로 권한 상승이 필요 없다.
+#   (adts-enroll 은 CA 개인키를 다뤄야 해서 root 지만 여기는 다르다)
+User=pi
+Group=pi
+
+ExecStart=/opt/adts/adts_daemon
+
+# ★ /dev/turret 을 기다린다.
+#
+#   데몬은 turret 이 없으면 **degraded 모드로 조용히 계속 뜬다**(개발 PC 대응).
+#   부팅 시엔 그게 함정이다 — 커널 모듈 적재가 이 유닛보다 늦으면 스캐너가
+#   붙지 않은 채 서비스가 "active" 로 표시되고, 스캔 요청이 전부 무시된다.
+#   여기서 30초 기다리고, 그래도 없으면 **실패시킨다.** 조용한 degraded 보다
+#   시끄러운 실패가 낫다.
+#
+#   ⚠️ 개발 PC/컨테이너에서 degraded 로 띄우고 싶으면 이 줄을 지울 것.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 30 ]; do [ -e /dev/turret ] && exit 0; i=$((i+1)); sleep 1; done; echo "/dev/turret 없음 — turret_driver 적재 확인"; exit 1'
+
+# 산출물 디렉터리. systemd 가 /var/lib/adts/scans 를 만들고 User 소유로 맞춘다.
+#   → 예전에 root 소유 디렉터리에 pi 로 쓰다 스캔 40,342점을 통째로 날린 적이
+#     있다. 손으로 mkdir 하지 않고 systemd 가 보장하게 둔다.
+StateDirectory=adts/scans
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/adts
+
+# 접속/인증서. 값은 데몬 기본값과 같지만, 여기 적어두면 systemctl edit 로
+# 코드 수정 없이 바꿀 수 있다.
+Environment=ADTS_MQTT_HOST=127.0.0.1
+Environment=ADTS_MQTT_PORT=8883
+Environment=ADTS_MQTT_CA=/etc/adts/certs/ca.crt
+Environment=ADTS_MQTT_CERT=/etc/adts/certs/daemon.crt
+Environment=ADTS_MQTT_KEY=/etc/adts/certs/daemon.key
+
+Restart=on-failure
+RestartSec=5
+
+# ⚠️ SIGTERM 을 받으면 데몬이 signalfd 로 잡아 graceful shutdown 을 한다:
+#   STM32 에 DISARM 을 보내고, 스캔 중이었으면 격자를 파일로 마감한다.
+#   1.25MB 를 쓰므로 기본 90초면 충분하지만 명시해 둔다. 여기서 KILL 이 나면
+#   그 스캔의 산출물이 사라진다.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# ── 권한 축소 ──────────────────────────────────────────────────────────────
+# ⚠️ PrivateDevices 는 쓰지 않는다. 그걸 켜면 /dev 가 최소 집합으로 바뀌어
+#   /dev/turret · /dev/imu · /dev/led_sw 가 통째로 사라진다.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/adts
+
+[Install]
+WantedBy=multi-user.target
+
+# ── 수동 설치 ────────────────────────────────────────────────────────────────
+#   sudo install -Dm755 daemon/build/adts_daemon /opt/adts/adts_daemon
+#   sudo cp daemon/adts-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now adts-daemon
+#
+# ── 확인 ────────────────────────────────────────────────────────────────────
+#   systemctl status adts-daemon
+#   journalctl -u adts-daemon -f

@@ -15,6 +15,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>        /* unlink — 쓰기 가능 확인용 probe 파일 제거 */
 
 #define SCAN_OUT_DIR  "/var/lib/adts/scans"   /* 실패 시 ./scans 로 폴백 */
 
@@ -352,6 +353,36 @@ struct scan_out *scan_out_open(const struct scan_request *req,
     (void)snprintf(o->js_path, sizeof(o->js_path), "%s/%s_%s_pan_tilt_lidar.json",
                    dir, o->session_id, o->scan_id);
 
+    /* ★ 여기서 **실제로 파일을 만들어 본다.**
+     *
+     * 산출물은 스캔이 다 끝난 뒤(scan_out_close)에야 기록된다 — 격자를 통째로
+     * 메모리에 들고 있다가 마지막에 쓰기 때문이다. 그래서 쓰기 권한이 없으면
+     * **40,000점을 10분간 모으고 나서** fopen 이 실패하고, 그 시점엔 데이터를
+     * 되살릴 방법이 없다. 실기에서 그대로 당했다(scans/ 가 root 소유였는데
+     * 데몬을 sudo 없이 돌림 → "Permission denied" 두 줄 남기고 전량 유실).
+     *
+     * 위의 mkdir 은 이걸 못 잡는다. 디렉토리가 이미 있으면 EEXIST 로 통과하는데,
+     * "존재한다" 와 "쓸 수 있다" 는 다른 얘기다.
+     *
+     * ⚠️ access(W_OK) 를 쓰지 않는다. 그건 **실제 uid** 로 검사해서 데몬이
+     *   권한을 떨어뜨려 실행될 때 답이 틀리고, 읽기전용 마운트·디스크 가득 같은
+     *   경우도 못 잡는다. 진짜로 열어보는 것이 유일하게 믿을 만한 검사다.
+     *
+     * 검사 후 지운다 — 0바이트 파일을 남기면 실패한 스캔이 산출물처럼 보인다. */
+    FILE *probe = fopen(o->pc_path, "w");
+    if (probe == NULL) {
+        core_log(o->log, "SCAN",
+                 "출력 경로에 쓸 수 없음 %s: %s — 스캔을 시작하지 않는다",
+                 o->pc_path, strerror(errno));
+        core_log(o->log, "SCAN",
+                 "  (디렉토리 소유자 확인: ls -ld %s / 고치기: sudo chown -R $USER %s)",
+                 dir, dir);
+        free(o);
+        return NULL;
+    }
+    (void)fclose(probe);
+    (void)unlink(o->pc_path);
+
     grid_dims(&o->req, &o->grid_rows, &o->grid_cols);
 
     const size_t n = (size_t)o->grid_rows * (size_t)o->grid_cols;
@@ -514,12 +545,12 @@ void scan_out_add(struct scan_out *o, const struct proto_scan_point *p)
 
 /* organized PCD 출력 (변환 후 x/y/z, meter).
  * 미측정 셀은 nan 으로 남겨 구멍과 실패를 구분 가능하게 한다. */
-static void write_pcd(struct scan_out *o)
+static bool write_pcd(struct scan_out *o)
 {
     FILE *fp = fopen(o->pc_path, "w");
     if (fp == NULL) {
         core_log(o->log, "SCAN", "PCD 생성 실패 %s: %s", o->pc_path, strerror(errno));
-        return;
+        return false;
     }
 
     const size_t n = (size_t)o->grid_rows * (size_t)o->grid_cols;
@@ -571,17 +602,21 @@ static void write_pcd(struct scan_out *o)
                           r * ct * cos(pan));
         }
     }
-    (void)fclose(fp);
+    /* ⚠️ fclose 결과까지 본다. 디스크가 가득 찼거나 마운트가 사라진 경우
+     *   fprintf 는 조용히 성공하고 **버퍼가 비워지는 fclose 에서야** 실패한다.
+     *   여기서 안 보면 "산출 완료" 를 찍어놓고 실제 파일은 잘려 있게 된다. */
+    const bool wr_ok = (ferror(fp) == 0);
+    return (fclose(fp) == 0) && wr_ok;
 }
 
 /* 원시 측정 JSON 출력 (변환 전 — 계약상 golden reference).
  * x/y/z 는 넣지 않는다. 캘리브 adapter 가 distance/pan/tilt 로 직접 계산한다. */
-static void write_json(struct scan_out *o)
+static bool write_json(struct scan_out *o)
 {
     FILE *fp = fopen(o->js_path, "w");
     if (fp == NULL) {
         core_log(o->log, "SCAN", "JSON 생성 실패 %s: %s", o->js_path, strerror(errno));
-        return;
+        return false;
     }
 
     /* 헤더의 진단 수치를 먼저 확정한다 — 셀 루프보다 앞에 찍히기 때문. */
@@ -804,7 +839,8 @@ static void write_json(struct scan_out *o)
     }
 
     (void)fprintf(fp, "  ]\n}\n");
-    (void)fclose(fp);
+    const bool wr_ok = (ferror(fp) == 0);   /* write_pcd 의 주석 참조 */
+    return (fclose(fp) == 0) && wr_ok;
 }
 
 /* 격자를 두 포맷으로 산출하고 해제한다. */
@@ -815,15 +851,24 @@ void scan_out_close(struct scan_out **po)
         return;
     }
     struct scan_out *o = *po;
-    write_json(o);      /* 변환 전 원시 (계약) */
-    write_pcd(o);       /* 변환 후 x/y/z (뷰어·편의) */
+    const bool js_ok = write_json(o);   /* 변환 전 원시 (계약) */
+    const bool pc_ok = write_pcd(o);    /* 변환 후 x/y/z (뷰어·편의) */
 
-    core_log(o->log, "SCAN",
-             "산출 완료 %ux%u — 유효 %u셀 (병합 %u, 평균거부 %u, 범위밖 %u)",
-             o->grid_rows, o->grid_cols, o->pc_written,
-             o->merged, o->avg_refused, o->drop_range);
-    core_log(o->log, "SCAN", "  JSON: %s", o->js_path);
-    core_log(o->log, "SCAN", "  PCD : %s", o->pc_path);
+    /* ⚠️ 실패해도 "산출 완료" 를 찍고 경로를 나열하던 시절이 있었다. 로그만
+     *   보면 성공으로 보여서, 파일이 없는 걸 한참 뒤에야 알아챘다. 결과를
+     *   말 그대로 적는다. */
+    if (js_ok && pc_ok) {
+        core_log(o->log, "SCAN",
+                 "산출 완료 %ux%u — 유효 %u셀 (병합 %u, 평균거부 %u, 범위밖 %u)",
+                 o->grid_rows, o->grid_cols, o->pc_written,
+                 o->merged, o->avg_refused, o->drop_range);
+        core_log(o->log, "SCAN", "  JSON: %s", o->js_path);
+        core_log(o->log, "SCAN", "  PCD : %s", o->pc_path);
+    } else {
+        core_log(o->log, "SCAN",
+                 "★ 산출 실패 (JSON=%s PCD=%s) — 유효했던 %u셀은 복구 불가",
+                 js_ok ? "ok" : "FAIL", pc_ok ? "ok" : "FAIL", o->pc_written);
+    }
 
     free(o->grid);
     free(o);

@@ -118,15 +118,15 @@ static struct platform_device *g_plat_dev = NULL;
 static void sw_poll_timer_handler(struct timer_list *t)
 {
 	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
+	/* 스위치는 pull-up + active-low 라 눌리면 0 이다. 핀이 없으면 안 눌린
+	 * 것으로 본다 — 없는 스위치가 계속 눌린 상태로 보이면 EMS 가 상시 발동한다. */
 	u8 pressed_scan = 0, pressed_ems = 0;
 
-	if (gpio_is_valid(dev->pin_sw_scan_start)) {
+	if (gpio_is_valid(dev->pin_sw_scan_start))
 		pressed_scan = (gpio_get_value(dev->pin_sw_scan_start) == 0) ? 1 : 0;
-	}
-	
-	if (gpio_is_valid(dev->pin_sw_ems)) {
+
+	if (gpio_is_valid(dev->pin_sw_ems))
 		pressed_ems = (gpio_get_value(dev->pin_sw_ems) == 0) ? 1 : 0;
-	}
 
 
 	if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
@@ -512,7 +512,10 @@ static int led_sw_probe(struct platform_device *pdev)
 
 	ret = misc_register(&g_led_sw->misc);
 	if (ret) {
-		pr_err("led_sw: misc_register result: %d\n", ret);
+		/* ⚠️ 예전엔 로그만 남기고 0 을 반환했다. 그러면 /dev/led_sw 가 없는데도
+		 *   insmod 가 성공하고 probe 성공 로그까지 찍혀서, 데몬이 "open 실패 →
+		 *   degraded" 로 조용히 넘어간 이유를 찾기 어려웠다. 실패는 실패로 알린다. */
+		pr_err("led_sw: misc_register failed: %d\n", ret);
 		led_sw_teardown();
 		return ret;
 	}
@@ -526,21 +529,13 @@ static int led_sw_probe(struct platform_device *pdev)
 static void led_sw_remove(struct platform_device *pdev)
 {
 	(void)pdev;
-	if (g_led_sw) {
-		misc_deregister(&g_led_sw->misc);
-		led_sw_teardown();
-		pr_info("led_sw: driver removed\n");
-	}
+	led_sw_teardown();
 }
 #else
 static int led_sw_remove(struct platform_device *pdev)
 {
 	(void)pdev;
-	if (g_led_sw) {
-		misc_deregister(&g_led_sw->misc);
-		led_sw_teardown();
-		pr_info("led_sw: driver removed\n");
-	}
+	led_sw_teardown();
 	return 0;
 }
 #endif

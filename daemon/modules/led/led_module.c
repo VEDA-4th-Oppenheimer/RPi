@@ -147,7 +147,11 @@ static void led_on_event(struct shared_ctx *ctx)
             (void)fprintf(stderr, "[led     ] SW_SCAN_START pressed -> CMD_SCAN_START trigger\n");
             if (ctx->req.valid == 0u) {
                 ctx->req.pan_start_ddeg   = 0;       /* 0.0 도 */
-                ctx->req.pan_end_ddeg     = 1790;    /* 179.0 도 */
+                /* ⚠️ 1800 이 아니라 1790 이다. 팬 0~180 을 양끝 다 넣으면 첫 줄과
+                 *   마지막 줄이 **같은 수직 평면**이라 방위 0/180 만 두 번 찍힌다
+                 *   (실측 중복 180건). 1790 으로 끊으면 0건. 자세한 건
+                 *   scan_out_warn_seam() 주석 참조. */
+                ctx->req.pan_end_ddeg     = 1790;    /* 179.0 도 — 이음매 회피 */
                 ctx->req.tilt_start_ddeg  = -900;    /* -90.0 도 */
                 ctx->req.tilt_end_ddeg    = 900;     /* +90.0 도 */
                 ctx->req.step_ddeg        = 10;      /* 1.0 도 격자 */
