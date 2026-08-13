@@ -23,7 +23,16 @@ set -uo pipefail
 COUNT=5                 # 반복 횟수
 INTERVAL=15             # 회차 사이 대기(초)
 TIMEOUT=2400            # 회차당 제한시간(초). 0.9도 전체 스캔이 약 14분
-DAEMON=./adts_daemon
+# 데몬 실행파일. 스크립트 위치(<repo>/daemon/tools/)에서 역산해 찾는다 —
+# 예전에는 ./adts_daemon 고정이라 레포 안에서 돌리면 못 찾았고, 실기에서는
+# 절대경로를 손으로 박아 쓰다가 pull 마다 충돌이 났다. -d 로 덮어쓸 수 있다.
+_SB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAEMON=""
+for _c in "$_SB_DIR/../build/adts_daemon" "$_SB_DIR/../adts_daemon" \
+          "./adts_daemon" "/opt/adts/adts_daemon"; do
+    [ -x "$_c" ] && { DAEMON="$_c"; break; }
+done
+[ -n "$DAEMON" ] || DAEMON=./adts_daemon      # 못 찾으면 아래에서 에러로 알린다
 OUTDIR=""
 KEEPGOING=0             # 1 = 실패해도 계속
 
