@@ -1,7 +1,10 @@
 /*
  * imu_driver.c — ICM-20948 I2C 캐릭터 디바이스 드라이버
  *
- * MPU-6050 에서 ICM-20948 로 교체 (배선 동일: SDA/SCL/GND/VCC, 주소 0x68).
+ * MPU-6050 에서 ICM-20948 로 교체. 배선은 동일(SDA/SCL/GND/VCC)하지만
+ * ⚠️ **슬레이브 주소가 0x68 -> 0x69 로 바뀐다.** GY-521 은 AD0 를 L 로 묶어
+ *   0x68 이었는데 이 ICM-20948 브레이크아웃은 AD0 가 H 다. 배선이 같아서
+ *   주소도 같으려니 하고 넘어가기 쉬운 지점이다(overlays/imu-overlay.dts 참조).
  *
  * ── /dev/imu 계약은 바뀌지 않는다 ──────────────────────────────────────────
  *   read(fd, buf, 6) 이 가속도 3축을 **빅엔디안 int16** 로 준다.
@@ -298,7 +301,8 @@ static void icm20948_remove(struct i2c_client *client)
 }
 
 /* sysfs new_device 로 손수 인스턴스화할 때 쓰이는 이름 매칭.
- *   echo icm20948 0x68 > /sys/bus/i2c/devices/i2c-1/new_device */
+ *   echo icm20948 0x69 > /sys/bus/i2c/devices/i2c-1/new_device
+ * (주소는 0x69 — 위 헤더 주석 참조. i2cdetect -y 1 로 실측 확인할 것) */
 static const struct i2c_device_id icm20948_id[] = {
     { "icm20948", 0 },
     { }
@@ -400,11 +404,15 @@ MODULE_DESCRIPTION("ICM-20948 Level Detection Driver");
 //sudo dtoverlay overlays/imu-overlay.dtbo
 //
 //# 3-B. 오버레이 없이 손으로 붙이기 (재부팅하면 사라짐)
-//echo icm20948 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
+//echo icm20948 0x69 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
 //
 //# 4. probe() 성공 로그 확인 — WHO_AM_I 불일치면 여기서 잡힌다
 //dmesg | tail -n 10
 //
-//# 5. 칩이 보이는지 확인 (0x68 또는 0x69)
+//# 5. 칩 주소 실측 (이 보드는 0x69. 0x68 이면 AD0 가 L 인 보드다)
 //i2cdetect -y 1
+//
+//# ⚠️ 순서 주의: DT 노드가 먼저 있어야 insmod 때 매칭된다. 오버레이를
+//#   나중에 올리면 compatible 속성만 바뀔 뿐 **재매칭이 안 일어나** probe 가
+//#   조용히 안 불린다. config.txt 로 부팅에 걸어두는 쪽이 확실하다.
 //Roll: 좌우 기울기, Pitch: 상하 기울기
