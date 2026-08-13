@@ -1,13 +1,17 @@
 /*
  * led-sw-overlay.dts — /dev/led_sw (LED x3 + Switch x2 + Hardware PWM Buzzer) Device Tree Overlay
  *
- * RPi GPIO 핀 선언:
- *   - LED_초록       : GPIO 27 (Pin 13에 연결됨)
- *   - LED_노랑       : GPIO 22 (Pin 15에 연결됨)
- *   - LED_빨강       : GPIO 17 (Pin 11에 연결됨)
- *   - 스위치_scan_start: GPIO 23 (Pin 16, Active Low with pull-up)
- *   - 스위치_ems      : GPIO 24 (Pin 18, Active Low with pull-up)
- *   - 수동 부저(Buzzer): GPIO 18 (Pin 12, Hardware PWM0)
+ * RPi GPIO 핀 선언 (BCM 번호 / 40핀 헤더 물리 번호):
+ *   - LED_초록        : BCM 27 / Pin 13
+ *   - LED_노랑        : BCM 22 / Pin 15
+ *   - LED_빨강        : BCM 17 / Pin 11
+ *   - 수동 부저(Buzzer): BCM 18 / Pin 12 (Hardware PWM0)
+ *   - 스위치_scan_start: BCM 23 / Pin 16 (Active Low, pull-up)
+ *   - 스위치_ems       : BCM 24 / Pin 18 (Active Low, pull-up)
+ *
+ * ⚠️ 아래 brcm,pins 와 gpios-* 는 **BCM 번호**다. 물리 핀 번호를 쓰면 엉뚱한
+ *   핀이 잡힌다. 드라이버(led_sw_driver.c)의 모듈 파라미터 기본값과 반드시
+ *   같아야 한다 — 오버레이가 이기므로 어긋나면 드라이버 쪽이 조용히 무시된다.
  *
  * 빌드 및 적용:
  *   make dtbo

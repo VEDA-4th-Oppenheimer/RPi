@@ -3,12 +3,19 @@
  * ----------------------------------------------------------------------------
  *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
  *
- *  하드웨어 구성:
- *    - LED_초록 (Green)  : 명령코드 중 제어코드 동작 중 (GPIO 27 기본값, Pin 11에 연결)
- *    - LED_노랑 (Yellow) : 명령 대기 중                 (GPIO 17 기본값, Pin 13에 연결)
- *    - LED_빨강 (Red)    : 에러(코드) 발생              (GPIO 22 기본값)
- *    - 스위치_scan_start : 스캔 시작 CMD_SCAN_START     (GPIO 23 기본값, IRQ)
- *    - 스위치_ems        : 즉시 정지 CMD_DISARM         (GPIO 24 기본값, IRQ)
+ *  하드웨어 구성 (BCM 번호 / 40핀 헤더 물리 번호):
+ *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 27 / Pin 13
+ *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 22 / Pin 15
+ *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 17 / Pin 11
+ *    - 부저              : 이벤트 알림        BCM 26 / Pin 37
+ *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
+ *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
+ *
+ *  ⚠️ BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
+ *    이 주석이 아래 모듈 파라미터 기본값과 어긋난 적이 있다(초록·노랑·빨강이
+ *    전부 다르게 적혀 있었다). 배선하는 사람이 여기만 보고 꽂으면 LED 자리가
+ *    바뀌므로, 핀을 옮기면 **이 표 / 모듈 파라미터 / 오버레이 / led_sw_test
+ *    네 곳을 함께** 고칠 것.
  *
  *  기능:
  *    - Platform Driver + DeviceTree (adts,led-sw) 매칭 및 수동 insmod 폴백 지원
