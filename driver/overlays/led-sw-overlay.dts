@@ -54,4 +54,11 @@
 			};
 		};
 	};
+
+	fragment@2 {
+		target = <&pwm>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
 };
