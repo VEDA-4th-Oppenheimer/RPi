@@ -522,16 +522,14 @@ static int led_sw_probe(struct platform_device *pdev)
 	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
 	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 
-	/* 수동 부저용 하드웨어 PWM 장치 요청 */
+	/* 수동 부저용 하드웨어 PWM 장치 요청 (Device Tree 기반) */
 	if (pdev && pdev->dev.of_node) {
 		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
-		if (IS_ERR(g_led_sw->pwm_buzzer))
-			g_led_sw->pwm_buzzer = NULL;
-	}
-	if (!g_led_sw->pwm_buzzer) {
-		g_led_sw->pwm_buzzer = pwm_request(0, "led_sw_buzzer");
-		if (IS_ERR(g_led_sw->pwm_buzzer))
-			g_led_sw->pwm_buzzer = NULL;
+		if (IS_ERR(g_led_sw->pwm_buzzer)) {
+			g_led_sw->pwm_buzzer = of_pwm_get(pdev->dev.of_node, "buzzer");
+			if (IS_ERR(g_led_sw->pwm_buzzer))
+				g_led_sw->pwm_buzzer = NULL;
+		}
 	}
 
 	if (g_led_sw->pwm_buzzer) {
