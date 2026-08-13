@@ -19,7 +19,7 @@
  *  모듈 담당 (v3):
  *    - mqtt_module : 이현우 코어 + 이광진 협업 (RPi Mosquitto 브로커 클라이언트.
  *                    scan/start·stop 수신 -> FSM 트리거, scan/status·done 발행)
- *    - imu_module  : 송영빈 (/dev/imu MPU-6050 read -> roll/pitch 제공.
+ *    - imu_module  : 송영빈 (/dev/imu ICM-20948 read -> roll/pitch 제공.
  *                    수평 게이트 "판정"은 코어가 한다)
  *    - led_module  : 이현우 (/dev/led = 상태 LED x3 + 액티브 부저 x1)
  *

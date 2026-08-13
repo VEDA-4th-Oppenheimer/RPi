@@ -28,7 +28,7 @@
 │   ├── core/                #   epoll 루프·FSM·좌표변환·pcd 내보내기 (이현우)
 │   └── modules/
 │       ├── mqtt/            #   브로커 연동 (이현우 + 이광진)
-│       ├── imu/             #   /dev/imu (MPU-6050) 수평 기준 (송영빈)
+│       ├── imu/             #   /dev/imu (ICM-20948) 수평 기준 (송영빈)
 │       └── led/             #   ⏳ STUB — /dev/led 미구현
 │
 ├── broker/                  # Mosquitto 설정·인증서 발급 (이광진)
