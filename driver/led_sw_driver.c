@@ -4,10 +4,10 @@
  *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
  *
  *  하드웨어 구성 (BCM 번호 / 40핀 헤더 물리 번호):
- *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 27 / Pin 13
- *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 22 / Pin 15
- *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 17 / Pin 11
- *    - 부저              : 이벤트 알림        BCM 26 / Pin 37
+ *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 17 / Pin 11
+ *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 27 / Pin 13
+ *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 22 / Pin 15
+ *    - 부저              : 이벤트 알림        BCM 18 / Pin 12 (Hardware PWM0)
  *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
  *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
  *
@@ -26,6 +26,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/compiler.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/gpio.h>
@@ -42,8 +43,8 @@
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/version.h>
-#include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/pwm.h>
 
 #include "../shared/led_sw.h"
 
@@ -57,25 +58,27 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("VEDA Oppenheimer Team");
 MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
-MODULE_VERSION("1.1");
+MODULE_VERSION("2.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 27;  /* Physical Pin 13 (Green LED) */
-static int gpio_yellow     = 22;  /* Physical Pin 15 (Yellow LED) */
-static int gpio_red        = 17;  /* Physical Pin 11 (Red LED) */
-static int gpio_buzzer     = 26;  /* Physical Pin 37 (Buzzer) */
+static int gpio_green      = 17;  /* Physical Pin 11 (Green LED) */
+static int gpio_yellow     = 27;  /* Physical Pin 13 (Yellow LED) */
+static int gpio_red        = 22;  /* Physical Pin 15 (Red LED) */
+static int gpio_buzzer     = 18;  /* Physical Pin 12 (Buzzer - Hardware PWM0) */
 static int gpio_scan_start = 23;  /* Physical Pin 16 (Scan Start Sw) */
 static int gpio_ems        = 24;  /* Physical Pin 18 (EMS Sw) */
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 22)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
 
 module_param(gpio_red, int, 0444);
-MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 17)");
+MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
 
+module_param(gpio_buzzer, int, 0444);
+MODULE_PARM_DESC(gpio_buzzer, "GPIO pin for Buzzer (default: 18, HW PWM0)");
 
 module_param(gpio_scan_start, int, 0444);
 MODULE_PARM_DESC(gpio_scan_start, "GPIO pin for Scan Start Switch (default: 23)");
@@ -85,6 +88,9 @@ MODULE_PARM_DESC(gpio_ems, "GPIO pin for EMS Switch (default: 24)");
 
 #define EVENT_FIFO_SIZE 64
 #define DEBOUNCE_DELAY_MS 50
+
+#define BUZZER_PWM_PERIOD_NS 500000UL /* 500us = 2kHz */
+#define BUZZER_PWM_DUTY_NS   250000UL /* 250us = 50% duty */
 
 struct led_sw_dev {
 	struct miscdevice misc;
@@ -102,9 +108,8 @@ struct led_sw_dev {
 	/* 폴링 타이머 (인터럽트 대체) */
 	struct timer_list poll_timer;
 
-	/* 수동 부저(Passive Buzzer)용 커널 스레드 (소프트웨어 PWM) */
-	struct task_struct *buzzer_thread;
-	int buzzer_toggle;
+	/* 수동 부저(Passive Buzzer)용 하드웨어 PWM 장치 */
+	struct pwm_device *pwm_buzzer;
 
 	/* LED 및 스위치 상태 캐시 */
 	u8 led_state[LED_MAX];
@@ -165,29 +170,20 @@ static void sw_poll_timer_handler(struct timer_list *t)
 }
 
 /* ---------------------------------------------------------------------------
- *  수동 부저(Passive Buzzer) 커널 스레드 (소프트웨어 PWM)
+ *  수동 부저(Passive Buzzer) 하드웨어 PWM 제어 (CPU 점유율 0%)
  * ------------------------------------------------------------------------- */
-static int buzzer_kthread_func(void *data)
+static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on)
 {
-	struct led_sw_dev *dev = data;
-
-	while (!kthread_should_stop()) {
-		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
-			dev->buzzer_toggle = !dev->buzzer_toggle;
-			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
-			
-			/* 수동 부저 (Passive Buzzer) 2kHz 정밀 톤 생성 (반주기 250us udelay).
-			 * usleep_range 는 커널 스케줄링 지터(1~4ms)로 인해 주파수가 100Hz 이하로 떨어져
-			 * 소리가 나지 않았음. udelay(250)으로 정밀 2kHz 톤 출력. */
-			udelay(250);
-			cond_resched();
-
+	if (dev->pwm_buzzer) {
+		if (on) {
+			pwm_config(dev->pwm_buzzer, BUZZER_PWM_DUTY_NS, BUZZER_PWM_PERIOD_NS);
+			pwm_enable(dev->pwm_buzzer);
 		} else {
-			gpio_set_value(dev->pin_buzzer, 0);
-			msleep(20);
+			pwm_disable(dev->pwm_buzzer);
 		}
+	} else if (gpio_is_valid(dev->pin_buzzer)) {
+		gpio_set_value(dev->pin_buzzer, 0);
 	}
-	return 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -208,20 +204,15 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
 	case LED_RED:
 		pin = dev->pin_led_red;
 		break;
-
-
 	case LED_BUZZER:
 		if (on != dev->led_state[LED_BUZZER]) {
 			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
-			if (!on) {
-				gpio_set_value(dev->pin_buzzer, 0);
-			}
+			set_buzzer_hw_pwm(dev, on);
 		}
-		return; /* 수동 부저는 kthread가 led_state를 폴링하며 1kHz 펄스를 생성함 */
+		return;
 	default:
 		return;
 	}
-
 
 	if (gpio_is_valid(pin)) {
 		gpio_set_value(pin, on);
@@ -412,11 +403,6 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label)
 static void led_sw_teardown(void)
 {
 	if (g_led_sw) {
-		if (g_led_sw->buzzer_thread) {
-			kthread_stop(g_led_sw->buzzer_thread);
-			g_led_sw->buzzer_thread = NULL;
-		}
-
 		led_sw_del_timer_sync(&g_led_sw->poll_timer);
 
 		/* LED 및 부저 소등 후 해제 */
@@ -424,6 +410,12 @@ static void led_sw_teardown(void)
 		set_led_hw(g_led_sw, LED_YELLOW, 0);
 		set_led_hw(g_led_sw, LED_RED, 0);
 		set_led_hw(g_led_sw, LED_BUZZER, 0);
+
+		if (g_led_sw->pwm_buzzer && !IS_ERR(g_led_sw->pwm_buzzer)) {
+			pwm_disable(g_led_sw->pwm_buzzer);
+			pwm_put(g_led_sw->pwm_buzzer);
+			g_led_sw->pwm_buzzer = NULL;
+		}
 
 		if (gpio_is_valid(g_led_sw->pin_sw_ems))
 			gpio_free(g_led_sw->pin_sw_ems);
@@ -494,6 +486,26 @@ static int led_sw_probe(struct platform_device *pdev)
 			g_led_sw->pin_buzzer = gpio_tmp;
 	}
 
+	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%) */
+	if (pdev) {
+		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
+		if (IS_ERR(g_led_sw->pwm_buzzer)) {
+			g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
+			if (IS_ERR(g_led_sw->pwm_buzzer))
+				g_led_sw->pwm_buzzer = NULL;
+		}
+	}
+
+	if (g_led_sw->pwm_buzzer) {
+		pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
+	} else {
+		/* Hardware PWM 미사용 시에만 일반 GPIO 요청 */
+		ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
+		if (ret) {
+			pr_warn("led_sw: gpio buzzer (%d) request warning: %d\n", g_led_sw->pin_buzzer, ret);
+		}
+	}
+
 	/* GPIO 요청 - LED */
 	ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
 	if (ret) {
@@ -513,12 +525,6 @@ static int led_sw_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
-	if (ret) {
-		pr_err("led_sw: gpio buzzer (%d) request failed: %d\n", g_led_sw->pin_buzzer, ret);
-		return ret;
-	}
-
 	/* GPIO 요청 - Switches */
 	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
 	if (ret) {
@@ -535,13 +541,6 @@ static int led_sw_probe(struct platform_device *pdev)
 	/* 폴링 타이머 초기화 및 시작 (50ms) */
 	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
 	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
-
-	/* 수동 부저(Passive Buzzer)용 커널 스레드 시작 */
-	g_led_sw->buzzer_thread = kthread_run(buzzer_kthread_func, g_led_sw, "buzzer_pwm_thread");
-	if (IS_ERR(g_led_sw->buzzer_thread)) {
-		pr_warn("led_sw: Failed to create buzzer kthread\n");
-		g_led_sw->buzzer_thread = NULL;
-	}
 
 	/* misc device 등록 (/dev/led_sw) */
 	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;

@@ -1,11 +1,11 @@
 /*
- * led-sw-overlay.dts — /dev/led_sw (LED x3 + Switch x2) Device Tree Overlay
+ * led-sw-overlay.dts — /dev/led_sw (LED x3 + Switch x2 + Hardware PWM Buzzer) Device Tree Overlay
  *
  * RPi GPIO 핀 선언 (BCM 번호 / 40핀 헤더 물리 번호):
- *   - LED_초록        : BCM 27 / Pin 13
- *   - LED_노랑        : BCM 22 / Pin 15
- *   - LED_빨강        : BCM 17 / Pin 11
- *   - 부저            : BCM 26 / Pin 37
+ *   - LED_초록        : BCM 17 / Pin 11
+ *   - LED_노랑        : BCM 27 / Pin 13
+ *   - LED_빨강        : BCM 22 / Pin 15
+ *   - 수동 부저(Buzzer): BCM 18 / Pin 12 (Hardware PWM0)
  *   - 스위치_scan_start: BCM 23 / Pin 16 (Active Low, pull-up)
  *   - 스위치_ems       : BCM 24 / Pin 18 (Active Low, pull-up)
  *
@@ -28,10 +28,10 @@
 		target = <&gpio>;
 		__overlay__ {
 			led_sw_pins: led_sw_pins {
-				/* 27: Green, 22: Yellow, 17: Red, 23: Scan Start, 24: EMS, 26: Buzzer */
-				brcm,pins = <27 22 17 23 24 26>;
-				brcm,function = <1 1 1 0 0 1>; /* 1: Output, 0: Input */
-				brcm,pull = <0 0 0 2 2 0>;     /* 0: None, 2: Pull-Up */
+				/* 17: Green, 27: Yellow, 22: Red, 23: Scan Start, 24: EMS (GPIO 18 is managed by hardware PWM) */
+				brcm,pins = <17 27 22 23 24>;
+				brcm,function = <1 1 1 0 0>; /* 1: Output, 0: Input */
+				brcm,pull = <0 0 0 2 2>;     /* 0: None, 2: Pull-Up */
 			};
 		};
 	};
@@ -46,14 +46,23 @@
 				pinctrl-names = "default";
 				pinctrl-0 = <&led_sw_pins>;
 
-				gpios-led-green      = <&gpio 27 0>;
-				gpios-led-yellow     = <&gpio 22 0>;
-				gpios-led-red        = <&gpio 17 0>;
+				gpios-led-green      = <&gpio 17 0>;
+				gpios-led-yellow     = <&gpio 27 0>;
+				gpios-led-red        = <&gpio 22 0>;
 
 				gpios-sw-scan-start  = <&gpio 23 1>;
 				gpios-sw-ems         = <&gpio 24 1>;
-				gpios-buzzer         = <&gpio 26 0>;
+				gpios-buzzer         = <&gpio 18 0>;
+				pwms                 = <&pwm 0 500000 0>;
+				pwm-names            = "buzzer";
 			};
+		};
+	};
+
+	fragment@2 {
+		target = <&pwm>;
+		__overlay__ {
+			status = "okay";
 		};
 	};
 };
