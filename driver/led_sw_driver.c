@@ -411,9 +411,11 @@ static void led_sw_teardown(void)
 		set_led_hw(g_led_sw, LED_RED, 0);
 		set_led_hw(g_led_sw, LED_BUZZER, 0);
 
-		if (g_led_sw->pwm_buzzer && !IS_ERR(g_led_sw->pwm_buzzer)) {
+		if (g_led_sw->pwm_buzzer) {
+			/* 소리를 끄기만 한다. **pwm_put 은 부르지 않는다** —
+			 * devm_pwm_get 으로 받았으므로 커널이 디바이스 정리 때
+			 * 알아서 놓는다. 여기서 또 놓으면 이중 해제다. */
 			pwm_disable(g_led_sw->pwm_buzzer);
-			pwm_put(g_led_sw->pwm_buzzer);
 			g_led_sw->pwm_buzzer = NULL;
 		}
 
@@ -486,14 +488,31 @@ static int led_sw_probe(struct platform_device *pdev)
 			g_led_sw->pin_buzzer = gpio_tmp;
 	}
 
-	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%) */
-	if (pdev) {
-		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
-		if (IS_ERR(g_led_sw->pwm_buzzer)) {
-			g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
-			if (IS_ERR(g_led_sw->pwm_buzzer))
-				g_led_sw->pwm_buzzer = NULL;
+	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%).
+	 *
+	 * ⚠️ devm_pwm_get 실패 시 pwm_get 으로 재시도하던 코드를 뺐다. 둘은 같은
+	 *   조회를 하므로 앞이 실패하고 뒤가 성공할 일이 없고, 더 나쁜 것은
+	 *   **해제 경로가 갈린다**는 점이다. devm 으로 받은 것을 teardown 에서
+	 *   pwm_put() 하면 devm 이 디바이스 정리 때 또 put 해서 **이중 해제**가 난다.
+	 *   devm 하나만 쓰고 해제는 커널에 맡긴다.
+	 *
+	 * ⚠️ -EPROBE_DEFER 는 삼키지 않는다. PWM 컨트롤러가 아직 안 올라온 상태라
+	 *   "나중에 다시 불러 달라"는 뜻인데, NULL 로 눌러버리면 GPIO 폴백으로 새서
+	 *   PWM 드라이버가 나중에 쓸 GPIO18 을 우리가 쥐게 된다. 그대로 올려보내
+	 *   커널이 probe 를 다시 부르게 한다. */
+	/* pdev NULL 검사는 두지 않는다 — 이 함수 첫 줄에서 이미 pdev->dev.of_node
+	 * 를 읽으므로, NULL 이면 거기서 이미 죽는다. 플랫폼 버스가 NULL 로 부르는
+	 * 일도 없다. 뒤늦은 검사는 "여기까지 오면 NULL 일 수 있다" 는 잘못된
+	 * 인상만 준다. */
+	g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
+	if (IS_ERR(g_led_sw->pwm_buzzer)) {
+		const int perr = PTR_ERR(g_led_sw->pwm_buzzer);
+
+		g_led_sw->pwm_buzzer = NULL;
+		if (perr == -EPROBE_DEFER) {
+			return perr;
 		}
+		pr_info("led_sw: hardware PWM 없음 (%d) — GPIO 폴백\n", perr);
 	}
 
 	if (g_led_sw->pwm_buzzer) {
