@@ -478,6 +478,26 @@ static int led_sw_probe(struct platform_device *pdev)
 			g_led_sw->pin_buzzer = gpio_tmp;
 	}
 
+	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%) */
+	if (pdev) {
+		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
+		if (IS_ERR(g_led_sw->pwm_buzzer)) {
+			g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
+			if (IS_ERR(g_led_sw->pwm_buzzer))
+				g_led_sw->pwm_buzzer = NULL;
+		}
+	}
+
+	if (g_led_sw->pwm_buzzer) {
+		pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
+	} else {
+		/* Hardware PWM 미사용 시에만 일반 GPIO 요청 */
+		ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
+		if (ret) {
+			pr_warn("led_sw: gpio buzzer (%d) request warning: %d\n", g_led_sw->pin_buzzer, ret);
+		}
+	}
+
 	/* GPIO 요청 - LED */
 	ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
 	if (ret) {
@@ -497,12 +517,6 @@ static int led_sw_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
-	if (ret) {
-		pr_err("led_sw: gpio buzzer (%d) request failed: %d\n", g_led_sw->pin_buzzer, ret);
-		return ret;
-	}
-
 	/* GPIO 요청 - Switches */
 	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
 	if (ret) {
@@ -519,22 +533,6 @@ static int led_sw_probe(struct platform_device *pdev)
 	/* 폴링 타이머 초기화 및 시작 (50ms) */
 	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
 	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
-
-	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%) */
-	if (pdev) {
-		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
-		if (IS_ERR(g_led_sw->pwm_buzzer)) {
-			g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
-			if (IS_ERR(g_led_sw->pwm_buzzer))
-				g_led_sw->pwm_buzzer = NULL;
-		}
-	}
-
-	if (g_led_sw->pwm_buzzer) {
-		pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
-	} else {
-		pr_warn("led_sw: Hardware PWM unavailable, GPIO fallback mode\n");
-	}
 
 	/* misc device 등록 (/dev/led_sw) */
 	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
