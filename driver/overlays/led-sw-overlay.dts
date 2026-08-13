@@ -1,12 +1,13 @@
 /*
- * led-sw-overlay.dts — /dev/led_sw (LED x3 + Switch x2) Device Tree Overlay
+ * led-sw-overlay.dts — /dev/led_sw (LED x3 + Switch x2 + Hardware PWM Buzzer) Device Tree Overlay
  *
  * RPi GPIO 핀 선언:
- *   - LED_초록       : GPIO 27 (Pin 11에 연결됨)
- *   - LED_노랑       : GPIO 17 (Pin 13에 연결됨)
- *   - LED_빨강       : GPIO 22 (pin 15)
- *   - 스위치_scan_start: GPIO 23 (pin 16, Active Low with pull-up)
- *   - 스위치_ems      : GPIO 24 (pin 18, Active Low with pull-up)
+ *   - LED_초록       : GPIO 27 (Pin 13에 연결됨)
+ *   - LED_노랑       : GPIO 22 (Pin 15에 연결됨)
+ *   - LED_빨강       : GPIO 17 (Pin 11에 연결됨)
+ *   - 스위치_scan_start: GPIO 23 (Pin 16, Active Low with pull-up)
+ *   - 스위치_ems      : GPIO 24 (Pin 18, Active Low with pull-up)
+ *   - 수동 부저(Buzzer): GPIO 18 (Pin 12, Hardware PWM0)
  *
  * 빌드 및 적용:
  *   make dtbo
@@ -23,9 +24,9 @@
 		target = <&gpio>;
 		__overlay__ {
 			led_sw_pins: led_sw_pins {
-				/* 27: Green, 22: Yellow, 17: Red, 23: Scan Start, 24: EMS, 26: Buzzer */
-				brcm,pins = <27 22 17 23 24 26>;
-				brcm,function = <1 1 1 0 0 1>; /* 1: Output, 0: Input */
+				/* 27: Green, 22: Yellow, 17: Red, 23: Scan Start, 24: EMS, 18: Buzzer (PWM) */
+				brcm,pins = <27 22 17 23 24 18>;
+				brcm,function = <1 1 1 0 0 2>; /* 1: Output, 0: Input, 2: ALT5 (PWM0) */
 				brcm,pull = <0 0 0 2 2 0>;     /* 0: None, 2: Pull-Up */
 			};
 		};
@@ -47,7 +48,9 @@
 
 				gpios-sw-scan-start  = <&gpio 23 1>;
 				gpios-sw-ems         = <&gpio 24 1>;
-				gpios-buzzer         = <&gpio 26 0>;
+				gpios-buzzer         = <&gpio 18 0>;
+				pwms                 = <&pwm 0 500000 0>;
+				pwm-names            = "buzzer";
 			};
 		};
 	};
