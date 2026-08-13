@@ -55,6 +55,13 @@ Environment=ADTS_MQTT_CA=/etc/adts/certs/ca.crt
 Environment=ADTS_MQTT_CERT=/etc/adts/certs/daemon.crt
 Environment=ADTS_MQTT_KEY=/etc/adts/certs/daemon.key
 
+# 스캔 JSON 을 받아갈 카메라(CV5 CCTV 앱)의 TCP 서버.
+# ⚠️ 무선이라 타임아웃을 넉넉히 둔다 — JSON 이 20~25MB 다.
+#   업로드를 잠시 끄려면:  systemctl edit adts-daemon  →  ADTS_CAM_DISABLE=1
+Environment=ADTS_CAM_HOST=172.20.32.29
+Environment=ADTS_CAM_PORT=8081
+Environment=ADTS_CAM_TIMEOUT_S=60
+
 Restart=on-failure
 RestartSec=5
 

@@ -34,8 +34,16 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>   /* notice_post 의 strncpy */
 
-#define DAEMON_MODULE_VERSION   3u
+/* v3 -> v4 (2026-08-13)
+ *   · scan_result 에 json_path 추가 — 카메라 업로드가 .pcd 경로에서 확장자를
+ *     조작해 추론하지 않도록. 규칙이 두 곳에 흩어지면 파일명 규칙을 바꿀 때
+ *     한쪽만 고쳐진다.
+ *   · daemon_notice 신설 — 코어/모듈이 "자기가 판단한 것"을 Qt 에 알리는 통로.
+ *     STM 이 올린 오류는 link.last_err 로 흐르는데, 코어 자신의 판정(수평 게이트
+ *     거부·홈 타임아웃·업로드 실패)은 전달 경로가 없어 로그로만 끝났다. */
+#define DAEMON_MODULE_VERSION   4u
 
 /* ---------------------------------------------------------------------------
  *  1. 시스템 상태머신 (v3 스캐너)
@@ -101,10 +109,38 @@ struct scan_progress {
 /* 스캔 결과 요약. 코어가 EXPORT 진입 시 씀, mqtt_module 이 scan/done 발행 */
 struct scan_result {
     char     path[256];         /* 생성된 포인트클라우드 파일 경로 (.pcd)     */
+    /* 원시 측정 JSON 경로. 카메라 단이 받는 것은 **이쪽**이다(.pcd 아님).
+     * 코어가 채운다 — 소비자가 .pcd 경로에서 확장자를 갈아끼워 추론하면
+     * 파일명 규칙이 두 곳에 살게 되어 한쪽만 바뀔 때 조용히 깨진다. */
+    char     json_path[256];
     uint32_t point_count;       /* 파일에 기록된 점 수                        */
     uint32_t stm_reported;      /* STM 이 CMD_SCAN_DONE 으로 보고한 점 수     */
     uint8_t  valid;             /* 1=파일 준비 완료                           */
 };
+
+/* 코어/모듈이 스스로 판단한 사건을 Qt 에 알리는 통로 (v4 신설).
+ *
+ * ★ 왜 필요한가: STM 이 올린 오류는 link.last_err 로 흐르지만, **데몬 자신의
+ *   판정**은 갈 곳이 없었다. 수평 게이트가 스캔을 거부해도, 홈이 20초 무응답으로
+ *   취소돼도, 카메라 업로드가 실패해도 로그에만 남아서 Qt 는 "명령을 보냈는데
+ *   아무 일도 안 일어난" 것으로 보였다.
+ *
+ * 사용법: 쓰는 쪽이 code/name/msg 를 채우고 seq 를 **증가**시킨다. mqtt_module 이
+ * seq 변화를 감지해 adts/event/error 로 발행한다. 같은 사건이 반복될 때도
+ * 구분되도록 값이 아니라 seq 로 에지를 잡는다. */
+struct daemon_notice {
+    uint32_t seq;               /* 증가 = 새 통지. 0 = 아직 없음              */
+    uint16_t code;              /* 100+ = 데몬 자체 판정 (STM 코드와 겹침 회피) */
+    uint8_t  fatal;             /* 1 = 작업 중단, 사용자 개입 필요             */
+    char     name[32];          /* 예: "ERR_NOT_LEVEL"                        */
+    char     msg[128];
+};
+
+/* 데몬 자체 판정 코드 (protocol.h 의 proto_err_code 와 겹치지 않게 100 부터) */
+#define NOTICE_DISARM        100u   /* 안전정지 (mqtt_module 이 직접 발행)     */
+#define NOTICE_HOME_TIMEOUT  101u
+#define NOTICE_NOT_LEVEL     102u
+#define NOTICE_UPLOAD_FAIL   103u
 
 /* 거치 수평 상태. imu_module 이 중력벡터에서 산출해 씀, 코어가 게이트 판정.
  * ※ 방식 A(게이트): 임계값 초과면 SCANNING 진입 거부. 좌표 보정 아님.
@@ -144,6 +180,10 @@ struct shared_ctx {
      * 필수는 아니지만, 설치·정비 때 축을 홈 자세로 보내 확인하는 용도다.
      * IDLE 에서만 받는다. 진행 상황은 link.homed 가 0 -> 1 로 알린다. */
     uint8_t  req_home;              /* mqtt: cmd/home 수신                    */
+
+    /* 코어/모듈 -> mqtt (event/error 발행). 위 daemon_notice 주석 참조.
+     * 쓰는 쪽은 notice_post() 를 쓴다 — seq 증가를 빠뜨리면 조용히 안 나간다. */
+    struct daemon_notice notice;
 
     void    *core;                  /* 코어 핸들 (core_* API 호출용)          */
 };
@@ -207,6 +247,7 @@ extern "C" {
 const struct daemon_module *mqtt_module_get(void);   /* 이현우 + 이광진 협업 */
 const struct daemon_module *imu_module_get(void);    /* 송영빈               */
 const struct daemon_module *led_module_get(void);    /* 이현우               */
+const struct daemon_module *camera_module_get(void); /* 이현우 + 이영민      */
 
 /* ---------------------------------------------------------------------------
  *  5. 코어 API  (모듈이 코어에 요청할 때 호출)
@@ -221,6 +262,37 @@ int core_request_state(void *core, daemon_state_t want);
 
 /* 구조화 로그 (감사/이벤트 로그). 코어가 stderr(추후 파일+syslog) 로 남김. */
 void core_log(void *core, const char *event, const char *fmt, ...);
+
+/* 블로킹 작업(수십 초짜리 파일 업로드 등)을 마친 뒤 heartbeat 기준선을 지금으로
+ * 되맞춘다.
+ *
+ * ★ 없으면: 데몬은 자기 CLOCK_MONOTONIC 으로 "300ms 넘게 PONG 없음 = link_dead"
+ *   를 판정한다. 루프가 업로드 때문에 30초 멈췄다 깨어나면 그 간격을 통신 두절로
+ *   오판해 **매번 DISARM** 이 걸린다. 링크는 멀쩡한데 성공한 스캔마다 Qt 에
+ *   빨간 오류가 뜬다. "내가 바빴던 것이지 링크가 죽은 게 아니다" 를 명시한다.
+ *
+ * ⚠️ 진짜 두절을 가릴 수 있으므로, **자기가 오래 블로킹했다는 것을 아는 쪽**만
+ *   부를 것. 주기 코드에서 습관적으로 부르면 heartbeat 가 무력해진다. */
+void core_hb_reprime(void *core);
+
+/* 통지 게시. seq 를 증가시켜 mqtt_module 이 에지로 잡게 한다.
+ * 헤더 인라인인 이유 = 코어와 모듈 양쪽에서 쓰는데 링크 대상이 갈리지 않게. */
+static inline void notice_post(struct shared_ctx *ctx, uint16_t code,
+                               uint8_t fatal, const char *name, const char *msg)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->notice.code  = code;
+    ctx->notice.fatal = fatal;
+    /* ⚠️ strncpy 는 소스가 길면 NUL 을 안 붙인다. 마지막 바이트를 직접
+     *   0 으로 눌러 잘림이 항상 종료되게 한다. */
+    strncpy(ctx->notice.name, name, sizeof(ctx->notice.name) - 1u);
+    ctx->notice.name[sizeof(ctx->notice.name) - 1u] = '\0';
+    strncpy(ctx->notice.msg, msg, sizeof(ctx->notice.msg) - 1u);
+    ctx->notice.msg[sizeof(ctx->notice.msg) - 1u] = '\0';
+    ctx->notice.seq++;              /* ★ 마지막에 — 위 필드가 다 채워진 뒤 */
+}
 
 #ifdef __cplusplus
 }  /* extern "C" */

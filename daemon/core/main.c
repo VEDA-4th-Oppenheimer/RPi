@@ -203,6 +203,18 @@ static int make_signalfd(void)
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
+    /* ★ SIGHUP 도 받는다. 안 받으면 기본 동작이 "즉시 종료" 라서 core_shutdown
+     *   이 안 불리고, **격자가 메모리에 있는 채로 프로세스가 사라진다** —
+     *   산출물은 스캔이 끝날 때 한 번에 쓰이므로 27분짜리 스캔이 통째로 없어진다.
+     *
+     *   SIGHUP 은 SSH 접속이 끊길 때 온다. 터미널의 pty 가 닫히면 커널이 전경
+     *   프로세스 그룹 전체에 보내므로, tmux 없이 원격에서 돌리다 회선이 끊기면
+     *   그대로 당한다(§19-3 의 권한 사고와 결과가 같다).
+     *
+     *   데몬에 다시 읽을 설정 파일이 없으므로 관례적 의미("설정 재적재")와
+     *   충돌하지 않는다. TERM 과 똑같이 graceful shutdown 으로 처리한다 —
+     *   DISARM 을 보내 축을 세우고 여기까지 받은 점으로 파일을 마감한다. */
+    sigaddset(&mask, SIGHUP);
     if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
         return -1;
     }
@@ -715,6 +727,8 @@ static void core_transition(struct core *c, daemon_state_t want)
         /* 경로·점수를 **닫기 전에** 뽑는다 — close 가 핸들을 해제한다. */
         (void)snprintf(c->ctx.result.path, sizeof(c->ctx.result.path), "%s",
                        scan_out_path(c->out));
+        (void)snprintf(c->ctx.result.json_path, sizeof(c->ctx.result.json_path),
+                       "%s", scan_out_json_path(c->out));
         c->ctx.result.point_count = scan_out_point_count(c->out);
         scan_out_close(&c->out);
         c->ctx.result.valid       = 1u;
@@ -781,6 +795,7 @@ static bool core_setup(struct core *c)
         mqtt_module_get(),
         imu_module_get(),
         led_module_get(),
+        camera_module_get(),
     };
     const int n_regs = (int)(sizeof(regs) / sizeof(regs[0]));
 
@@ -812,6 +827,51 @@ static bool core_setup(struct core *c)
     return true;
 }
 
+/* 모듈 fd 가 바뀌었으면 epoll 등록을 갱신한다.
+ *
+ * ★ 예전에는 setup 에서 get_fd() 를 **한 번만** 부르고 끝이었다. 그런데
+ *   소켓을 쓰는 모듈은 fd 가 런타임에 바뀐다:
+ *     · mqtt — 브로커 재접속하면 새 소켓이라 fd 가 달라진다. 갱신하지 않으면
+ *       코어는 **닫힌 옛 fd** 를 계속 감시하고 새 소켓의 수신은 영영 못 본다
+ *       (증상: 브로커가 재시작하면 명령이 안 먹는데 로그는 "접속됨" 이다).
+ *     · 업로드처럼 필요할 때만 소켓을 여는 모듈은 처음엔 -1 이다가 나중에 생긴다.
+ *
+ *   daemon_module.h 의 get_fd 주석이 "코어는 필요 시 재등록한다" 라고 이미
+ *   약속하고 있었는데 구현이 없었다. 여기서 지킨다.
+ *
+ * 100ms tick 마다 get_fd() 를 부르는 비용은 함수 호출 몇 개라 무시할 수준이다.
+ * ⚠️ EPOLL_CTL_DEL 은 **닫히기 전에** 불려야 하는데, 모듈이 이미 close 했다면
+ *   커널이 알아서 등록을 해제하므로 실패해도 무해하다(반환값을 안 본다). */
+static void core_refresh_module_fds(struct core *c)
+{
+    for (int i = 0; i < c->n_modules; ++i) {
+        const struct daemon_module *m = c->modules[i];
+
+        if (m->get_fd == NULL) {
+            continue;
+        }
+        const int now_fd = m->get_fd();
+        const int old_fd = c->module_fd[i];
+
+        if (now_fd == old_fd) {
+            continue;
+        }
+        if (old_fd >= 0) {
+            (void)epoll_ctl(c->epoll_fd, EPOLL_CTL_DEL, old_fd, NULL);
+        }
+        if (now_fd >= 0) {
+            if (!epoll_add(c->epoll_fd, now_fd, EPOLLIN)) {
+                core_log(c, "SETUP", "module '%s' fd 재등록 실패 (fd=%d)",
+                         m->name, now_fd);
+                c->module_fd[i] = -1;      /* 다음 tick 에 다시 시도한다 */
+                continue;
+            }
+        }
+        c->module_fd[i] = now_fd;
+        core_log(c, "SETUP", "module '%s' fd %d -> %d", m->name, old_fd, now_fd);
+    }
+}
+
 static void core_tick(struct core *c)
 {
     uint64_t expirations = 0;
@@ -820,6 +880,7 @@ static void core_tick(struct core *c)
     }
 
     core_poll_link(c);           /* STM 링크 캐시 + heartbeat 판정 */
+    core_refresh_module_fds(c);  /* 소켓 재접속 등으로 fd 가 바뀌었나 */
 
     /* ⚠️ 복구를 정지보다 **먼저** 소비한다. 같은 tick 에 둘 다 서면(예: 조작자가
      *   REARM 을 누른 직후 링크가 끊겨 자동 정지가 걸린 경우) 나중에 처리되는
@@ -947,6 +1008,19 @@ int core_request_state(void *core, daemon_state_t want)
 {
     core_transition((struct core *)core, want);
     return 0;
+}
+
+void core_hb_reprime(void *core)
+{
+    struct core *c = core;
+
+    if (c == NULL) {
+        return;
+    }
+    /* 지금을 마지막 PONG 관측 시각으로 삼는다. seq 도 현재값으로 맞춰,
+     * 다음 tick 이 "그새 PONG 이 왔다" 로 착각하지 않게 한다. */
+    c->hb_last_pong = mono_ms();
+    core_log(c, "HB", "heartbeat 기준선 재설정 (블로킹 작업 후)");
 }
 
 void core_log(void *core, const char *event, const char *fmt, ...)

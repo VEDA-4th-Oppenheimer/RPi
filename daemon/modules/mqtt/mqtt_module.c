@@ -123,6 +123,11 @@ static uint8_t   s_last_level_verdict;
  *   ctx 로 충분히 가려진다. */
 static bool      s_user_disarm;
 
+/* 마지막으로 발행한 코어 통지의 seq. 코어/다른 모듈이 notice_post() 로
+ * 올린 것을 여기서 event/error 로 내보낸다. seq 로 에지를 잡는 이유는
+ * **같은 코드가 다시 나도 새 사건**이기 때문이다(값 비교로는 못 잡는다). */
+static uint32_t  s_notice_seq;
+
 /* ---------------------------------------------------------------------------
  *  보조
  * ------------------------------------------------------------------------- */
@@ -580,6 +585,14 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
             publish_state(ctx);
             s_last_level_verdict = verdict;
         }
+    }
+
+    /* 코어/모듈이 스스로 판단한 사건(수평 게이트 거부·홈 타임아웃·업로드 실패).
+     * STM 이 올린 오류와 경로가 다르다 — 그쪽은 아래 link.last_err 다. */
+    if (ctx->notice.seq != s_notice_seq) {
+        s_notice_seq = ctx->notice.seq;
+        publish_error((int)ctx->notice.code, ctx->notice.name,
+                      ctx->notice.msg, ctx->notice.fatal != 0u);
     }
 
     /* STM 오류가 새로 뜨면 이벤트로 알린다 (같은 코드 반복 발행 방지) */
