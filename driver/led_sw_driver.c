@@ -4,10 +4,10 @@
  *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
  *
  *  하드웨어 구성 (BCM 번호 / 40핀 헤더 물리 번호):
- *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 27 / Pin 13
- *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 22 / Pin 15
- *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 17 / Pin 11
- *    - 부저              : 이벤트 알림        BCM 26 / Pin 37
+ *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 17 / Pin 11
+ *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 27 / Pin 13
+ *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 22 / Pin 15
+ *    - 부저              : 이벤트 알림        BCM 18 / Pin 12 (Hardware PWM0)
  *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
  *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
  *
@@ -26,6 +26,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/compiler.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/gpio.h>
@@ -60,21 +61,21 @@ MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
 MODULE_VERSION("2.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 27;  /* Physical Pin 13 (Green LED) */
-static int gpio_yellow     = 22;  /* Physical Pin 15 (Yellow LED) */
-static int gpio_red        = 17;  /* Physical Pin 11 (Red LED) */
+static int gpio_green      = 17;  /* Physical Pin 11 (Green LED) */
+static int gpio_yellow     = 27;  /* Physical Pin 13 (Yellow LED) */
+static int gpio_red        = 22;  /* Physical Pin 15 (Red LED) */
 static int gpio_buzzer     = 18;  /* Physical Pin 12 (Buzzer - Hardware PWM0) */
 static int gpio_scan_start = 23;  /* Physical Pin 16 (Scan Start Sw) */
 static int gpio_ems        = 24;  /* Physical Pin 18 (EMS Sw) */
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 22)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
 
 module_param(gpio_red, int, 0444);
-MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 17)");
+MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
 
 module_param(gpio_buzzer, int, 0444);
 MODULE_PARM_DESC(gpio_buzzer, "GPIO pin for Buzzer (default: 18, HW PWM0)");
