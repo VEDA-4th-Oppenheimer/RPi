@@ -24,10 +24,10 @@
 		target = <&gpio>;
 		__overlay__ {
 			led_sw_pins: led_sw_pins {
-				/* 27: Green, 22: Yellow, 17: Red, 23: Scan Start, 24: EMS, 18: Buzzer (PWM) */
-				brcm,pins = <27 22 17 23 24 18>;
-				brcm,function = <1 1 1 0 0 2>; /* 1: Output, 0: Input, 2: ALT5 (PWM0) */
-				brcm,pull = <0 0 0 2 2 0>;     /* 0: None, 2: Pull-Up */
+				/* 27: Green, 22: Yellow, 17: Red, 23: Scan Start, 24: EMS (GPIO 18 is managed by hardware PWM) */
+				brcm,pins = <27 22 17 23 24>;
+				brcm,function = <1 1 1 0 0>; /* 1: Output, 0: Input */
+				brcm,pull = <0 0 0 2 2>;     /* 0: None, 2: Pull-Up */
 			};
 		};
 	};
