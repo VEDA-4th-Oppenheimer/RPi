@@ -282,8 +282,19 @@ static bool level_gate_ok(struct core *c)
     const float ar = (l->roll_deg  < 0.0f) ? -l->roll_deg  : l->roll_deg;
     const float ap = (l->pitch_deg < 0.0f) ? -l->pitch_deg : l->pitch_deg;
     if (ar > LEVEL_GATE_MAX_DEG || ap > LEVEL_GATE_MAX_DEG) {
+        char msg[128];
+
         core_log(c, "LEVEL", "수평 NG: roll=%.2f pitch=%.2f (임계 %.1f) — 스캔 거부",
                  (double)l->roll_deg, (double)l->pitch_deg, (double)LEVEL_GATE_MAX_DEG);
+        /* ★ Qt 에 알린다. 이게 없으면 조작자 입장에서는 스캔을 시켰는데
+         *   state 가 SCANNING 으로 안 가고 **아무 일도 안 일어난 것처럼** 보인다.
+         *   fatal 로 보내는 이유: 킷을 물리적으로 다시 세우기 전에는 아무리
+         *   눌러도 안 되므로 사용자 개입이 반드시 필요하다. */
+        (void)snprintf(msg, sizeof(msg),
+                       "킷이 기울었다 roll=%.2f pitch=%.2f (임계 %.1f) — 거치 재조정 필요",
+                       (double)l->roll_deg, (double)l->pitch_deg,
+                       (double)LEVEL_GATE_MAX_DEG);
+        notice_post(&c->ctx, NOTICE_NOT_LEVEL, 1u, "ERR_NOT_LEVEL", msg);
         return false;
     }
     core_log(c, "LEVEL", "수평 OK: roll=%.2f pitch=%.2f",
@@ -505,9 +516,18 @@ static bool core_await_home(struct core *c)
     } else if (c->ctx.link.homed != 0u) {
         waiting = false;                   /* 이번 HOME 에 대한 응답 도착 */
     } else if ((now - c->home_req_first_ms) > HOME_TIMEOUT_MS) {
+        char msg[128];
+
         core_log(c, "HOME",
                  "홈 무응답 %ums — 요청 취소 (링크/펌웨어 확인)",
                  HOME_TIMEOUT_MS);
+        /* ★ Qt 통지. STM 이 ERR 를 올렸다면 그건 link.last_err 로 따로 나가지만,
+         *   **아무 응답도 없는 경우**는 여기서만 알 수 있다. 실기에서 이 구멍
+         *   때문에 UART 링크 문제로 오해했다(실제로는 엔코더 판독 실패였다). */
+        (void)snprintf(msg, sizeof(msg),
+                       "홈 무응답 %ums (직전 STM 오류코드 %u)",
+                       HOME_TIMEOUT_MS, c->ctx.link.last_err);
+        notice_post(&c->ctx, NOTICE_HOME_TIMEOUT, 1u, "ERR_HOME_TIMEOUT", msg);
         /* 스캔 대기 중이었다면 그 요청도 함께 버린다. 단독 홈(req_home)이면
          * 이미 0 이라 무해하다. 성공/실패 구분은 호출자가 link.homed 로 한다. */
         c->ctx.req.valid = 0u;

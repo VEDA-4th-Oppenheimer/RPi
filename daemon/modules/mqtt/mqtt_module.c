@@ -85,9 +85,9 @@
 #define STATE_HEARTBEAT_MS  5000u      /* 상태 무변화 시에도 주기 발행     */
 #define REQ_ID_LEN            33u      /* 32자 + NUL                        */
 
-/* 데몬이 자체 판정하는 오류 (STM 의 proto_err_code 와 겹치지 않게 100 부터) */
-#define ERRC_LINK_DEAD      100
-#define ERRC_HOME_TIMEOUT   101
+/* ⚠️ 여기 있던 ERRC_LINK_DEAD/ERRC_HOME_TIMEOUT 을 지웠다. daemon_module.h 의
+ *   NOTICE_* 와 **값은 같은데 이름만 다른 상수 두 벌**이 되어, 한쪽만 고치면
+ *   조용히 어긋나는 상태였다. 계약 헤더 쪽 하나만 쓴다. */
 
 /* ---------------------------------------------------------------------------
  *  모듈 상태
@@ -356,7 +356,12 @@ static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
     if (!get_pair(o, "pan_ddeg", &p0, &p1) ||
         !get_pair(o, "tilt_ddeg", &t0, &t1) ||
         !get_int (o, "step_ddeg", &step)) {
-        publish_error(4, "ERR_OUT_OF_RANGE", "필수 필드 누락/형식 오류", false);
+        /* ⚠️ 예전에는 4(ERR_OUT_OF_RANGE)를 빌려 썼다. 그건 STM32 가 "스캔
+         *   범위 밖" 에 쓰는 코드라, Qt 가 code=4 를 받고도 STM 이 거절한
+         *   건지 데몬이 페이로드를 못 읽은 건지 알 수 없었다. 데몬 자신의
+         *   판정이므로 100번대를 쓴다. */
+        publish_error((int)NOTICE_BAD_REQUEST, "ERR_BAD_REQUEST",
+                      "필수 필드 누락/형식 오류", false);
         core_log(ctx->core, "MQTT", "cmd/scan 파싱 실패");
         return;
     }
@@ -629,10 +634,10 @@ static void mqtt_on_state(struct shared_ctx *ctx,
         s_user_disarm = false;
 
         if (ctx->link.link_alive == 0u) {
-            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+            publish_error((int)NOTICE_DISARM, "ERR_DISARM",
                           "링크 두절 — 배선/전원 확인", true);
         } else if (ctx->link.last_err != 0u) {
-            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+            publish_error((int)NOTICE_DISARM, "ERR_DISARM",
                           "STM32 오류로 안전정지", true);
         } else if (user) {
             /* 사용자가 직접 눌렀다. 장비가 고장난 건 아니지만 **REARM 전까지
@@ -640,7 +645,7 @@ static void mqtt_on_state(struct shared_ctx *ctx,
              * 있을 수 있어 "누가 세웠다" 도 남겨야 한다.
              * 이름은 Qt 데모 브리지와 맞춘다 — 같은 사건이 실물/데모에서
              * 다르게 보이면 UI 를 두 번 만들게 된다. */
-            publish_error(ERRC_LINK_DEAD, "USER_DISARM",
+            publish_error((int)NOTICE_DISARM, "USER_DISARM",
                           "사용자 안전정지", true);
         } else {
             /* 스캔 후 되감기 유예 뒤의 자동 DISARM = 정상 종료.

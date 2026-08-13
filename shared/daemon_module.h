@@ -137,10 +137,17 @@ struct daemon_notice {
 };
 
 /* 데몬 자체 판정 코드 (protocol.h 의 proto_err_code 와 겹치지 않게 100 부터) */
-#define NOTICE_DISARM        100u   /* 안전정지 (mqtt_module 이 직접 발행)     */
-#define NOTICE_HOME_TIMEOUT  101u
-#define NOTICE_NOT_LEVEL     102u
-#define NOTICE_UPLOAD_FAIL   103u
+/* ★ 100 부터 시작하는 이유 = Qt 가 출처를 코드 하나로 가릴 수 있게:
+ *      code <  100  STM32 가 CMD_ERROR 로 올린 것 (protocol.h proto_err_code)
+ *      code >= 100  데몬이 스스로 판단한 것 (여기)
+ *   ⚠️ 이 규칙을 깨고 데몬이 1~6 을 빌려 쓰면 안 된다. 실제로 페이로드 파싱
+ *     오류가 4(ERR_OUT_OF_RANGE)를 빌려 쓰고 있었는데, Qt 는 그게 STM32 의
+ *     "스캔 범위 밖" 인지 데몬의 "필드 누락" 인지 구분할 수 없었다. */
+#define NOTICE_DISARM        100u   /* 안전정지 (링크 두절 / STM 오류 / 사용자) */
+#define NOTICE_HOME_TIMEOUT  101u   /* 홈 무응답으로 요청 취소                  */
+#define NOTICE_NOT_LEVEL     102u   /* 수평 게이트가 스캔을 거부                */
+#define NOTICE_UPLOAD_FAIL   103u   /* 카메라 업로드 실패 (파일은 로컬에 남음)  */
+#define NOTICE_BAD_REQUEST   104u   /* cmd 페이로드 필드 누락/형식 오류         */
 
 /* 거치 수평 상태. imu_module 이 중력벡터에서 산출해 씀, 코어가 게이트 판정.
  * ※ 방식 A(게이트): 임계값 초과면 SCANNING 진입 거부. 좌표 보정 아님.
