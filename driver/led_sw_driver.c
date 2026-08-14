@@ -520,7 +520,7 @@ static int led_sw_probe(struct platform_device *pdev) {
   if (ret) {
     pr_err("led_sw: gpio green (%d) request failed: %d\n",
            g_led_sw->pin_led_green, ret);
-    return ret;
+    goto err_teardown;
   }
 
   ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW,
@@ -528,14 +528,14 @@ static int led_sw_probe(struct platform_device *pdev) {
   if (ret) {
     pr_err("led_sw: gpio yellow (%d) request failed: %d\n",
            g_led_sw->pin_led_yellow, ret);
-    return ret;
+    goto err_teardown;
   }
 
   ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
   if (ret) {
     pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red,
            ret);
-    return ret;
+    goto err_teardown;
   }
 
   /* GPIO 요청 - Switches */
@@ -544,14 +544,14 @@ static int led_sw_probe(struct platform_device *pdev) {
   if (ret) {
     pr_err("led_sw: gpio scan_start (%d) request failed: %d\n",
            g_led_sw->pin_sw_scan_start, ret);
-    return ret;
+    goto err_teardown;
   }
 
   ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
   if (ret) {
     pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems,
            ret);
-    return ret;
+    goto err_teardown;
   }
 
   /* 폴링 타이머 초기화 및 시작 (50ms) */
@@ -568,19 +568,18 @@ static int led_sw_probe(struct platform_device *pdev) {
 
   ret = misc_register(&g_led_sw->misc);
   if (ret) {
-    /* ⚠️ 예전엔 로그만 남기고 0 을 반환했다. 그러면 /dev/led_sw 가 없는데도
-     *   insmod 가 성공하고 probe 성공 로그까지 찍혀서, 데몬이 "open 실패 →
-     *   degraded" 로 조용히 넘어간 이유를 찾기 어려웠다. 실패는 실패로 알린다.
-     */
     pr_err("led_sw: misc_register failed: %d\n", ret);
-    led_sw_teardown();
-    return ret;
+    goto err_teardown;
   }
 
   platform_set_drvdata(pdev, g_led_sw);
   pr_info("led_sw: driver probed & registered successfully (/dev/%s)\n",
           LED_SW_DEV_NAME);
   return 0;
+
+err_teardown:
+  led_sw_teardown();
+  return ret;
 }
 
 #if defined(LINUX_VERSION_CODE) && \
