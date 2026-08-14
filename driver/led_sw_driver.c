@@ -122,6 +122,7 @@ struct led_sw_dev {
   /* LED 및 스위치 상태 캐시 */
   u8 led_state[LED_MAX];
   u8 sw_state[SW_MAX];
+  bool misc_registered;
 
   /* 이벤트 FIFO (read/poll) */
   DECLARE_KFIFO(fifo, struct led_sw_event, EVENT_FIFO_SIZE);
@@ -405,6 +406,11 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
  *   실패할 수도 있다. */
 static void led_sw_teardown(void) {
   if (g_led_sw) {
+    if (g_led_sw->misc_registered) {
+      misc_deregister(&g_led_sw->misc);
+      g_led_sw->misc_registered = false;
+    }
+
     led_sw_del_timer_sync(&g_led_sw->poll_timer);
 
     /* LED 및 부저 소등 후 해제 */
@@ -571,6 +577,7 @@ static int led_sw_probe(struct platform_device *pdev) {
     pr_err("led_sw: misc_register failed: %d\n", ret);
     goto err_teardown;
   }
+  g_led_sw->misc_registered = true;
 
   platform_set_drvdata(pdev, g_led_sw);
   pr_info("led_sw: driver probed & registered successfully (/dev/%s)\n",
@@ -586,16 +593,12 @@ err_teardown:
     (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
 static void led_sw_remove(struct platform_device *pdev) {
   (void)pdev;
-  if (g_led_sw)
-    misc_deregister(&g_led_sw->misc);
   led_sw_teardown();
   pr_info("led_sw: driver removed\n");
 }
 #else
 static int led_sw_remove(struct platform_device *pdev) {
   (void)pdev;
-  if (g_led_sw)
-    misc_deregister(&g_led_sw->misc);
   led_sw_teardown();
   pr_info("led_sw: driver removed\n");
   return 0;
@@ -621,13 +624,28 @@ static struct platform_driver led_sw_platform_driver = {
  *  Init & Exit
  * ------------------------------------------------------------------------- */
 static int __init led_sw_init(void) {
-  (void)platform_driver_register(&led_sw_platform_driver);
+  int ret;
+
+  ret = platform_driver_register(&led_sw_platform_driver);
+  if (ret)
+    return ret;
 
   /* DT 오버레이가 미로딩되었거나 probe 수동 호출 필요 시 폴백 생성 */
   if (!g_led_sw) {
     g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
     if (IS_ERR(g_plat_dev)) {
+      ret = PTR_ERR(g_plat_dev);
       g_plat_dev = NULL;
+      platform_driver_unregister(&led_sw_platform_driver);
+      return ret;
+    }
+
+    /* 폴백 장치로도 probe 가 실패한 경우 */
+    if (!g_led_sw) {
+      platform_device_unregister(g_plat_dev);
+      g_plat_dev = NULL;
+      platform_driver_unregister(&led_sw_platform_driver);
+      return -ENODEV;
     }
   }
 
