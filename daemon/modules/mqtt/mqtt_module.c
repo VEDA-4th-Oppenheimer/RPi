@@ -198,8 +198,13 @@ static cJSON *build_state(const struct shared_ctx *ctx)
     lv = cJSON_AddObjectToObject(o, "level");
     if (lv != NULL) {
         (void)cJSON_AddBoolToObject  (lv, "valid", ctx->level.valid != 0u);
+        /* roll/pitch 는 설치각을 뺀 **이탈** 이다(게이트가 보는 값과 동일).
+         * raw_* 는 중력벡터 각 그대로 — 둘을 같이 실어야 Qt 에서 "리그가
+         * 기울었나" 와 "IMU 마운트가 틀어졌나" 를 구분할 수 있다. */
         (void)cJSON_AddNumberToObject(lv, "roll_deg",  ctx->level.roll_deg);
         (void)cJSON_AddNumberToObject(lv, "pitch_deg", ctx->level.pitch_deg);
+        (void)cJSON_AddNumberToObject(lv, "raw_roll_deg",  ctx->level.raw_roll_deg);
+        (void)cJSON_AddNumberToObject(lv, "raw_pitch_deg", ctx->level.raw_pitch_deg);
     }
     (void)cJSON_AddNumberToObject(o, "ts", (double)unix_ts());
     return o;

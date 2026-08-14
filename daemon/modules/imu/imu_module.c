@@ -12,10 +12,18 @@
  *
  *  ★ 역할 분리: "측정"은 이 모듈, "판정(수평 게이트)"은 코어가 한다.
  *    코어 level_gate_ok() 가 SCANNING 진입 시 ctx->level 을 보고
- *    LEVEL_GATE_MAX_DEG(1.5도) 초과면 스캔을 거부한다.
+ *    LEVEL_GATE_MAX_DEG 초과면 스캔을 거부한다.
  *    (방식 A = 게이트. 좌표 회전보정 아님 — 수평을 보장한 뒤 스캔한다.)
  *
+ *  ★ 설치각 오프셋(IMU_INSTALL_*_DEG)을 빼서 ctx->level 에 넣는다.
+ *    IMU 가 기구에 정확히 수평으로 붙어 있지 않아 중력벡터 각을 그대로 쓰면
+ *    가만히 있어도 게이트에 걸린다. 뺀 값의 의미는 "수평" 이 아니라
+ *    **"기준 자세로부터의 이탈"** 이다 — 그 기준을 무엇으로 잡았느냐가
+ *    게이트의 의미를 통째로 정하므로 daemon_module.h 의 해당 주석을 볼 것.
+ *
  *  ★ roll/pitch 원본은 버리지 않는다: 향후 방식 B(보정) 확장 시 그대로 재사용.
+ *    raw_roll_deg / raw_pitch_deg 에 남긴다 — 보정 대상은 "이탈" 이 아니라
+ *    실제 기울기라서 오프셋을 뺀 값으로는 복원이 안 된다.
  *    ctx->level 은 mqtt_module 이 adts/state/daemon 의 "level" 블록으로
  *    그대로 발행하므로 Qt 관제에서도 실시간으로 보인다.
  *
@@ -82,9 +90,11 @@ static int16_t imu_be16(const unsigned char *p)
 
 static int imu_init(struct shared_ctx *ctx)
 {
-    ctx->level.valid     = 0u;
-    ctx->level.roll_deg  = 0.0f;
-    ctx->level.pitch_deg = 0.0f;
+    ctx->level.valid         = 0u;
+    ctx->level.roll_deg      = 0.0f;
+    ctx->level.pitch_deg     = 0.0f;
+    ctx->level.raw_roll_deg  = 0.0f;
+    ctx->level.raw_pitch_deg = 0.0f;
 
     /* ⚠️ 열기 실패해도 0(성공) 을 반환한다. IMU 가 없다고 데몬 전체가 죽으면
      *   개발이 막히고, 코어는 level.valid==0 을 "게이트 생략" 으로 이미
@@ -169,14 +179,30 @@ static void imu_on_tick(struct shared_ctx *ctx, daemon_state_t state)
             const float ay = (float)raw_ay / IMU_ACCEL_LSB_PER_G;
             const float az = (float)raw_az / IMU_ACCEL_LSB_PER_G;
 
-            ctx->level.roll_deg  = atan2f(ay, az) * 180.0f / (float)M_PI;
-            ctx->level.pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
-                                 * 180.0f / (float)M_PI;
+            const float raw_roll  = atan2f(ay, az) * 180.0f / (float)M_PI;
+            const float raw_pitch = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
+                                  * 180.0f / (float)M_PI;
+
+            /* 중력벡터 각 원본은 그대로 남긴다 — 방식 B(좌표 보정)는 "이탈"
+             * 이 아니라 실제 기울기를 필요로 한다. */
+            ctx->level.raw_roll_deg  = raw_roll;
+            ctx->level.raw_pitch_deg = raw_pitch;
+
+            /* 게이트와 Qt 표시가 보는 값 = 기준 자세로부터의 이탈.
+             * 오프셋의 의미와 재교정 절차는 daemon_module.h 의
+             * IMU_INSTALL_*_DEG 주석 참조. */
+            ctx->level.roll_deg  = raw_roll  - IMU_INSTALL_ROLL_DEG;
+            ctx->level.pitch_deg = raw_pitch - IMU_INSTALL_PITCH_DEG;
             ctx->level.valid     = 1u;
 
             if (s_first_report == 0u) {
+                /* 원본과 이탈을 **둘 다** 찍는다. 오프셋을 뺀 값만 보이면
+                 * "센서가 수평을 읽는다" 와 "오프셋이 그만큼 빼주고 있다" 를
+                 * 구분할 수 없어, 마운트가 틀어져도 로그로는 알 수 없다. */
                 (void)fprintf(stderr,
-                    "[imu     ] 첫 측정 roll=%.2f pitch=%.2f (임계 %.1f)\n",
+                    "[imu     ] 첫 측정 raw roll=%.2f pitch=%.2f"
+                    " / 설치각 보정 후 roll=%.2f pitch=%.2f (임계 %.1f)\n",
+                    (double)raw_roll, (double)raw_pitch,
                     (double)ctx->level.roll_deg,
                     (double)ctx->level.pitch_deg,
                     (double)LEVEL_GATE_MAX_DEG);
