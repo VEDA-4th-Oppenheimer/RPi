@@ -583,8 +583,8 @@ static int led_sw_probe(struct platform_device *pdev) {
   return 0;
 }
 
-#if defined(LINUX_VERSION_CODE) &&                                             \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+#if defined(LINUX_VERSION_CODE) && \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
 static void led_sw_remove(struct platform_device *pdev) {
   (void)pdev;
   if (g_led_sw)
