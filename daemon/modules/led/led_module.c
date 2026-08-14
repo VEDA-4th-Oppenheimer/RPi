@@ -191,9 +191,13 @@ static void led_on_state(struct shared_ctx *ctx,
 {
     (void)old_st;
 
-    /* SCAN_DONE (ST_EXPORT 진입) 감지 */
+    /* SCAN_DONE (ST_EXPORT 진입) 감지 -> 0.5초 알림음 */
     if (new_st == ST_EXPORT) {
         s_buz_seq = BUZ_SCAN_DONE;
+        s_buz_ticks = 0;
+    } else if (new_st == ST_DISARM) {
+        /* 비상정지 (ST_DISARM 진입) 감지 -> 0.2초 2회 경고음 */
+        s_buz_seq = BUZ_ERROR;
         s_buz_ticks = 0;
     }
 
