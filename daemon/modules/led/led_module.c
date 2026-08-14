@@ -159,8 +159,13 @@ static void led_on_event(struct shared_ctx *ctx)
                 ctx->req.valid            = 1u;      /* 코어가 소비 */
             }
         } else if (evt.sw_id == SW_EMS) {
-            (void)fprintf(stderr, "[led     ] SW_EMS pressed -> CMD_DISARM trigger\n");
-            ctx->req_disarm = 1u;
+            if (ctx->state == ST_DISARM) {
+                (void)fprintf(stderr, "[led     ] SW_EMS pressed in DISARM -> CMD_REARM trigger\n");
+                ctx->req_rearm = 1u;
+            } else {
+                (void)fprintf(stderr, "[led     ] SW_EMS pressed -> CMD_DISARM trigger\n");
+                ctx->req_disarm = 1u;
+            }
         }
     }
 }
