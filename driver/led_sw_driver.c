@@ -49,7 +49,11 @@
 #include "../shared/led_sw.h"
 
 /* 커널 6.15+ 타이머 함수 이름 변경 호환성 매크로 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+#ifndef KERNEL_VERSION
+  #define KERNEL_VERSION(a, b, c) (((a) << 16) + ((b) << 8) + (c))
+#endif
+
+#if defined(LINUX_VERSION_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
   #define led_sw_del_timer_sync(t) timer_delete_sync(t)
 #else
   #define led_sw_del_timer_sync(t) del_timer_sync(t)
@@ -487,13 +491,11 @@ static int led_sw_probe(struct platform_device *pdev)
 	}
 
 	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%) */
-	if (pdev) {
-		g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
-		if (IS_ERR(g_led_sw->pwm_buzzer)) {
-			g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
-			if (IS_ERR(g_led_sw->pwm_buzzer))
-				g_led_sw->pwm_buzzer = NULL;
-		}
+	g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
+	if (IS_ERR(g_led_sw->pwm_buzzer)) {
+		g_led_sw->pwm_buzzer = pwm_get(&pdev->dev, "buzzer");
+		if (IS_ERR(g_led_sw->pwm_buzzer))
+			g_led_sw->pwm_buzzer = NULL;
 	}
 
 	if (g_led_sw->pwm_buzzer) {
@@ -564,7 +566,7 @@ static int led_sw_probe(struct platform_device *pdev)
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if defined(LINUX_VERSION_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
 static void led_sw_remove(struct platform_device *pdev)
 {
 	(void)pdev;

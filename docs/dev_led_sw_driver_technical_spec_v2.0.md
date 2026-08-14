@@ -1,8 +1,9 @@
-# [DeviceDriver] RPi GPIO LED·스위치·부저 통합 커널 드라이버 (/dev/led_sw) 기술 명세서 v2.0
+# [DeviceDriver] RPi GPIO LED·스위치·부저 통합 커널 드라이버 (/dev/led_sw) 기술 명세서 v2.1
 
 > **작성자**: 강유근 (YOOGEUN KANG)  
 > **소속 / 프로젝트**: VEDA Oppenheimer Team / VEDA ADTS Project  
-> **문서 버전**: v2.0  
+> **문서 버전**: v2.1  
+> **개정일**: 2026-08-13  
 > **대상 모듈**: `/dev/led_sw` (RPi4 GPIO 직결 3색 LED + 2종 물리 스위치 + 수동 부저 통합 커널 드라이버)  
 > **관련 소스 파일**:  
 > - 커널 드라이버: `driver/led_sw_driver.c`  
@@ -18,7 +19,7 @@
 ### 1.1 배경 및 목적
 본 모듈은 라즈베리파이4(Raspberry Pi 4) 단독 제어기 환경에서 외부 상태 표시용 **3색 LED (Green, Yellow, Red)**, 사용자 입력용 **물리 스위치 2종 (Scan Start, EMS)**, 및 알람/경보용 **수동 부저(Passive Buzzer)**를 효율적으로 통합 제어하기 위해 개발된 **단일 캐릭터 디바이스 드라이버 (`/dev/led_sw`)**입니다.
 
-유저 공간 데몬이 sysfs/GPIO를 개별적으로 제어할 경우 발생하는 컨텍스트 스위칭 오버헤드와 비동기 스위치 이벤트 처리 지연을 방지하기 위해, **커널 공간 내 Misc Device 등록, `kfifo` 링버퍼 기반 비동기 이벤트 통지, 소프트웨어 PWM 커널 스레드, 및 50ms 폴링 타이머 디바운스** 아키텍처를 적용했습니다.
+유저 공간 데몬이 sysfs/GPIO를 개별적으로 제어할 경우 발생하는 컨텍스트 스위칭 오버헤드와 비동기 스위치 이벤트 처리 지연을 방지하기 위해, **커널 공간 내 Misc Device 등록, `kfifo` 링버퍼 기반 비동기 이벤트 통지, BCM2835 Hardware PWM0 하드웨어 타이머(CPU 점유율 0%), 및 50ms 폴링 타이머 디바운스** 아키텍처를 적용했습니다.
 
 ### 1.2 주요 요구사항 및 상태 정의
 
@@ -27,7 +28,7 @@
 | **LED 0** | **Green LED** | 명령/스캔 제어 코드 동작 중 표시 | `LED_GREEN`: 스캔 진행 중 (`CMD_SCAN_START`) |
 | **LED 1** | **Yellow LED** | 대기 상태(Idle) 표시 | `LED_YELLOW`: 명령 대기 중 |
 | **LED 2** | **Red LED** | 비상/에러 상태 표시 | `LED_RED`: 시스템 에러 또는 비상 정지 발생 |
-| **Buzzer** | **Passive Buzzer** | 경보음 및 조작 피드백 음 출력 | `LED_BUZZER`: 소프트웨어 PWM 스레드로 ~400Hz 펄스 토글 |
+| **Buzzer** | **Passive Buzzer** | 경보음 및 조작 피드백 음 출력 | `LED_BUZZER`: BCM2835 Hardware PWM0 하드웨어 타이머 (2kHz 50% duty, CPU 점유율 0%) |
 | **SW 1** | **Scan Start Switch** | 스캔 시작 비동기 트리거 | `SW_SCAN_START`: 눌림 감지 시 데몬에 이벤트 전달 |
 | **SW 2** | **EMS Switch** | 즉시 정지(Emergency Stop) 트리거 | `SW_EMS`: 눌림 감지 시 즉시 비상 정지 로직 발동 |
 
@@ -53,10 +54,10 @@
 
 | 기능 명칭 | BCM GPIO 번호 | Physical Pin | 전기적 특성 | 기본 동작 속성 |
 | :--- | :--- | :--- | :--- | :--- |
-| `gpios-led-green` | **GPIO 27** | Pin 11 | Output, Push-Pull | Active High (1 = ON, 0 = OFF) |
-| `gpios-led-yellow` | **GPIO 17** | Pin 13 | Output, Push-Pull | Active High (1 = ON, 0 = OFF) |
+| `gpios-led-green` | **GPIO 17** | Pin 11 | Output, Push-Pull | Active High (1 = ON, 0 = OFF) |
+| `gpios-led-yellow` | **GPIO 27** | Pin 13 | Output, Push-Pull | Active High (1 = ON, 0 = OFF) |
 | `gpios-led-red` | **GPIO 22** | Pin 15 | Output, Push-Pull | Active High (1 = ON, 0 = OFF) |
-| `gpios-buzzer` | **GPIO 18** | Pin 12 | Hardware PWM0 | Active High (HW PWM 2kHz, 50% duty) |
+| `gpios-buzzer` | **GPIO 18** | Pin 12 | Hardware PWM0 | Active High (HW PWM 2kHz, 50% duty, CPU 0%) |
 | `gpios-sw-scan-start`| **GPIO 23** | Pin 16 | Input, Internal Pull-Up | Active Low (0 = Pressed, 1 = Released) |
 | `gpios-sw-ems` | **GPIO 24** | Pin 18 | Input, Internal Pull-Up | Active Low (0 = Pressed, 1 = Released) |
 
@@ -73,9 +74,9 @@
         target = <&gpio>;
         __overlay__ {
             led_sw_pins: led_sw_pins {
-                brcm,pins = <17 27 22 23 24 26>;
-                brcm,function = <1 1 1 0 0 1>; /* 1: Output, 0: Input */
-                brcm,pull = <0 0 0 2 2 0>;     /* 0: None, 2: Internal Pull-Up */
+                brcm,pins = <17 27 22 23 24>;
+                brcm,function = <1 1 1 0 0>; /* 1: Output, 0: Input */
+                brcm,pull = <0 0 0 2 2>;     /* 0: None, 2: Internal Pull-Up */
             };
         };
     };
@@ -95,8 +96,17 @@
                 gpios-led-red        = <&gpio 22 0>;
                 gpios-sw-scan-start  = <&gpio 23 1>;
                 gpios-sw-ems         = <&gpio 24 1>;
-                gpios-buzzer         = <&gpio 26 0>;
+                gpios-buzzer         = <&gpio 18 0>;
+                pwms                 = <&pwm 0 500000 0>;
+                pwm-names            = "buzzer";
             };
+        };
+    };
+
+    fragment@2 {
+        target = <&pwm>;
+        __overlay__ {
+            status = "okay";
         };
     };
 };
