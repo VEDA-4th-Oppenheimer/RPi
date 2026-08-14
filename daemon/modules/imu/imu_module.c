@@ -1,22 +1,35 @@
 /* ============================================================================
- *  imu_module.c  --  /dev/imu (MPU-6050) 수평 기준 제공
+ *  imu_module.c  --  /dev/imu (ICM-20948) 수평 기준 제공
  *  담당: 송영빈 (커널 드라이버 + 참조 구현) / 이현우 (데몬 모듈 연동)
  *
- *  MPU-6050(6축) 을 RPi I2C 에 직결하고 자작 캐릭터 드라이버 /dev/imu 로 노출.
+ *  ICM-20948(9축) 을 RPi I2C 에 직결하고 자작 캐릭터 드라이버 /dev/imu 로 노출.
  *  이 모듈은 가속도계 중력벡터를 읽어 roll/pitch 를 산출해 ctx->level 에 채운다.
+ *
+ *  ⚠️ MPU-6050 에서 교체됐지만 **이 파일의 코드는 바뀌지 않았다.** 드라이버가
+ *    /dev/imu 계약(6바이트, 빅엔디안, ±2g)을 그대로 유지하기 때문이다.
+ *    자력계는 안 쓴다 — MT6701 이 자기식 엔코더라 축마다 자석이 붙어 있고
+ *    스텝모터 코일도 바로 옆이라 방위 측정이 의미가 없다.
  *
  *  ★ 역할 분리: "측정"은 이 모듈, "판정(수평 게이트)"은 코어가 한다.
  *    코어 level_gate_ok() 가 SCANNING 진입 시 ctx->level 을 보고
- *    LEVEL_GATE_MAX_DEG(1.5도) 초과면 스캔을 거부한다.
+ *    LEVEL_GATE_MAX_DEG 초과면 스캔을 거부한다.
  *    (방식 A = 게이트. 좌표 회전보정 아님 — 수평을 보장한 뒤 스캔한다.)
  *
+ *  ★ 설치각 오프셋(IMU_INSTALL_*_DEG)을 빼서 ctx->level 에 넣는다.
+ *    IMU 가 기구에 정확히 수평으로 붙어 있지 않아 중력벡터 각을 그대로 쓰면
+ *    가만히 있어도 게이트에 걸린다. 뺀 값의 의미는 "수평" 이 아니라
+ *    **"기준 자세로부터의 이탈"** 이다 — 그 기준을 무엇으로 잡았느냐가
+ *    게이트의 의미를 통째로 정하므로 daemon_module.h 의 해당 주석을 볼 것.
+ *
  *  ★ roll/pitch 원본은 버리지 않는다: 향후 방식 B(보정) 확장 시 그대로 재사용.
+ *    raw_roll_deg / raw_pitch_deg 에 남긴다 — 보정 대상은 "이탈" 이 아니라
+ *    실제 기울기라서 오프셋을 뺀 값으로는 복원이 안 된다.
  *    ctx->level 은 mqtt_module 이 adts/state/daemon 의 "level" 블록으로
  *    그대로 발행하므로 Qt 관제에서도 실시간으로 보인다.
  *
  *  ── /dev/imu 계약 (driver/imu_driver.c) ──────────────────────────────────
- *    read(fd, buf, 6) 이 MPU-6050 레지스터 0x3B(ACCEL_XOUT_H) 부터 6바이트를
- *    **원본 그대로** 준다. 즉 ax/ay/az 각각 **빅엔디안 int16** 이다.
+ *    read(fd, buf, 6) 이 ICM-20948 뱅크0 레지스터 0x2D(ACCEL_XOUT_H) 부터
+ *    6바이트를 **원본 그대로** 준다. 즉 ax/ay/az 각각 **빅엔디안 int16** 이다.
  *      buf[0..1] = ax,  buf[2..3] = ay,  buf[4..5] = az
  *    len < 6 이면 -EINVAL, 드라이버는 떴는데 칩이 없으면 -ENODEV/-EIO.
  *
@@ -24,10 +37,16 @@
  *      roll  = atan2(ay, az)
  *      pitch = atan2(-ax, sqrt(ay^2 + az^2))
  *
- *    스케일 16384 LSB/g (±2g 기본 설정) 도 imu_test.c 를 그대로 따른다.
+ *    스케일 16384 LSB/g (±2g) 도 imu_test.c 를 그대로 따른다. ICM-20948 도
+ *    드라이버가 ACCEL_FS_SEL=±2g 로 잡으므로 MPU-6050 과 같은 값이다.
  *    ⚠️ 사실 atan2 는 비율만 쓰므로 스케일이 결과를 바꾸지 않는다. 그래도
  *      맞춰두는 이유는 같은 장비를 두 프로그램이 읽을 때 숫자가 어긋나면
  *      "어느 쪽이 맞나" 를 매번 따지게 되기 때문이다.
+ *
+ *  ⚠️ 축 방향은 **실측으로 확인해야 한다.** 칩이 바뀌면서 패키지 축 방향이나
+ *    브레이크아웃 실장 방향이 달라졌을 수 있어, 아래 roll/pitch 식의 부호가
+ *    뒤집히거나 두 축이 서로 바뀔 수 있다. 배선만 같다고 같은 각도가 나오지
+ *    않는다 — imu_test 로 앞뒤/좌우로 기울여 확인할 것.
  *
  *  ⚠️ read() 는 블로킹 I2C 다. 스캔 전 1회성 판정이라 실시간성이 없으므로
  *    저속(1초)으로만 갱신하고, 스캔 중에는 아예 읽지 않는다 — 단일스레드
@@ -47,7 +66,9 @@
 #define IMU_SAMPLE_BYTES   6
 #define IMU_PERIOD_MS      1000u    /* 사람이 수평을 맞추는 속도면 1Hz 로 충분 */
 #define IMU_ERR_LOG_EVERY  10u      /* 연속 실패 로그 도배 방지 */
-#define IMU_ACCEL_LSB_PER_G 16384.0f  /* ±2g 기본 설정 (imu_test.c 와 동일) */
+/* ±2g. 드라이버가 ICM20948_ACCEL_CFG_2G_5HZ 로 잡는 값과 짝이다 —
+ * 드라이버에서 레인지를 바꾸면 여기도 반드시 같이 고칠 것. */
+#define IMU_ACCEL_LSB_PER_G 16384.0f
 
 static int      s_fd = -1;
 static uint64_t s_last_ms;
@@ -61,7 +82,7 @@ static uint64_t imu_mono_ms(void)
     return ((uint64_t)ts.tv_sec * 1000u) + ((uint64_t)ts.tv_nsec / 1000000u);
 }
 
-/* 빅엔디안 int16 복원. MPU-6050 은 상위 바이트가 먼저다. */
+/* 빅엔디안 int16 복원. ICM-20948 도 MPU-6050 과 같이 상위 바이트가 먼저다. */
 static int16_t imu_be16(const unsigned char *p)
 {
     return (int16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
@@ -69,9 +90,11 @@ static int16_t imu_be16(const unsigned char *p)
 
 static int imu_init(struct shared_ctx *ctx)
 {
-    ctx->level.valid     = 0u;
-    ctx->level.roll_deg  = 0.0f;
-    ctx->level.pitch_deg = 0.0f;
+    ctx->level.valid         = 0u;
+    ctx->level.roll_deg      = 0.0f;
+    ctx->level.pitch_deg     = 0.0f;
+    ctx->level.raw_roll_deg  = 0.0f;
+    ctx->level.raw_pitch_deg = 0.0f;
 
     /* ⚠️ 열기 실패해도 0(성공) 을 반환한다. IMU 가 없다고 데몬 전체가 죽으면
      *   개발이 막히고, 코어는 level.valid==0 을 "게이트 생략" 으로 이미
@@ -144,7 +167,8 @@ static void imu_on_tick(struct shared_ctx *ctx, daemon_state_t state)
             ctx->level.valid = 0u;
             if (s_first_report == 0u) {
                 (void)fprintf(stderr,
-                    "[imu     ] 가속도 3축이 모두 0 — 칩 초기화(PWR_MGMT_1) 확인\n");
+                    "[imu     ] 가속도 3축이 모두 0 — 칩 초기화 확인"
+                    " (dmesg 에서 WHO_AM_I / PWR_MGMT_1 / BANK_SEL 로그)\n");
                 s_first_report = 2u;
             }
             return;
@@ -155,14 +179,30 @@ static void imu_on_tick(struct shared_ctx *ctx, daemon_state_t state)
             const float ay = (float)raw_ay / IMU_ACCEL_LSB_PER_G;
             const float az = (float)raw_az / IMU_ACCEL_LSB_PER_G;
 
-            ctx->level.roll_deg  = atan2f(ay, az) * 180.0f / (float)M_PI;
-            ctx->level.pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
-                                 * 180.0f / (float)M_PI;
+            const float raw_roll  = atan2f(ay, az) * 180.0f / (float)M_PI;
+            const float raw_pitch = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
+                                  * 180.0f / (float)M_PI;
+
+            /* 중력벡터 각 원본은 그대로 남긴다 — 방식 B(좌표 보정)는 "이탈"
+             * 이 아니라 실제 기울기를 필요로 한다. */
+            ctx->level.raw_roll_deg  = raw_roll;
+            ctx->level.raw_pitch_deg = raw_pitch;
+
+            /* 게이트와 Qt 표시가 보는 값 = 기준 자세로부터의 이탈.
+             * 오프셋의 의미와 재교정 절차는 daemon_module.h 의
+             * IMU_INSTALL_*_DEG 주석 참조. */
+            ctx->level.roll_deg  = raw_roll  - IMU_INSTALL_ROLL_DEG;
+            ctx->level.pitch_deg = raw_pitch - IMU_INSTALL_PITCH_DEG;
             ctx->level.valid     = 1u;
 
             if (s_first_report == 0u) {
+                /* 원본과 이탈을 **둘 다** 찍는다. 오프셋을 뺀 값만 보이면
+                 * "센서가 수평을 읽는다" 와 "오프셋이 그만큼 빼주고 있다" 를
+                 * 구분할 수 없어, 마운트가 틀어져도 로그로는 알 수 없다. */
                 (void)fprintf(stderr,
-                    "[imu     ] 첫 측정 roll=%.2f pitch=%.2f (임계 %.1f)\n",
+                    "[imu     ] 첫 측정 raw roll=%.2f pitch=%.2f"
+                    " / 설치각 보정 후 roll=%.2f pitch=%.2f (임계 %.1f)\n",
+                    (double)raw_roll, (double)raw_pitch,
                     (double)ctx->level.roll_deg,
                     (double)ctx->level.pitch_deg,
                     (double)LEVEL_GATE_MAX_DEG);

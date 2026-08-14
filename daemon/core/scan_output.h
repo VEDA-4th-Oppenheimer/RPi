@@ -116,6 +116,10 @@ void scan_out_close(struct scan_out **o);
  * ------------------------------------------------------------------------- */
 uint32_t    scan_out_point_count(const struct scan_out *o);  /* 격자에 담긴 유효 점 */
 const char *scan_out_path(const struct scan_out *o);         /* .pcd 경로 */
+/* 원시 측정 JSON 경로. 카메라 단이 받는 것은 이쪽이다.
+ * ⚠️ .pcd 경로에서 확장자를 갈아끼워 만들지 말 것 — 파일명 규칙이 두 곳에
+ *   살게 되어 한쪽만 바뀔 때 조용히 깨진다. */
+const char *scan_out_json_path(const struct scan_out *o);
 
 /* ---------------------------------------------------------------------------
  *  격자 기하 (핸들 없이도 요청만으로 답할 수 있는 것들)

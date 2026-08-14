@@ -34,18 +34,21 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/modules/mqtt
     ${CMAKE_SOURCE_DIR}/modules/imu
     ${CMAKE_SOURCE_DIR}/modules/led
+    ${CMAKE_SOURCE_DIR}/modules/camera
 )
 
 # 실행 파일 및 소스
 #   core/     = 이현우 (epoll 루프 + FSM + shared_ctx
 #                       + (pan,tilt,d)->(x,y,z) 변환 + 포인트클라우드 .pcd)
-#   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우  — 현재 STUB
+#   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우
+#               camera:이현우(송신) + 이영민(수신 CV5 앱)
 add_executable(adts_daemon
     core/main.c
     core/scan_output.c
     modules/mqtt/mqtt_module.c
     modules/imu/imu_module.c
     modules/led/led_module.c
+    modules/camera/camera_module.c
 )
 
 # 좌표 변환에 libm (cos/sin) 필요

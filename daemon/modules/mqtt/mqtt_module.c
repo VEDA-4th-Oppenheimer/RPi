@@ -85,9 +85,9 @@
 #define STATE_HEARTBEAT_MS  5000u      /* 상태 무변화 시에도 주기 발행     */
 #define REQ_ID_LEN            33u      /* 32자 + NUL                        */
 
-/* 데몬이 자체 판정하는 오류 (STM 의 proto_err_code 와 겹치지 않게 100 부터) */
-#define ERRC_LINK_DEAD      100
-#define ERRC_HOME_TIMEOUT   101
+/* ⚠️ 여기 있던 ERRC_LINK_DEAD/ERRC_HOME_TIMEOUT 을 지웠다. daemon_module.h 의
+ *   NOTICE_* 와 **값은 같은데 이름만 다른 상수 두 벌**이 되어, 한쪽만 고치면
+ *   조용히 어긋나는 상태였다. 계약 헤더 쪽 하나만 쓴다. */
 
 /* ---------------------------------------------------------------------------
  *  모듈 상태
@@ -122,6 +122,11 @@ static uint8_t   s_last_level_verdict;
  *   요청은 우리가 기억한다.** 나머지 판정(링크 두절 / STM 오류)은 그 시점의
  *   ctx 로 충분히 가려진다. */
 static bool      s_user_disarm;
+
+/* 마지막으로 발행한 코어 통지의 seq. 코어/다른 모듈이 notice_post() 로
+ * 올린 것을 여기서 event/error 로 내보낸다. seq 로 에지를 잡는 이유는
+ * **같은 코드가 다시 나도 새 사건**이기 때문이다(값 비교로는 못 잡는다). */
+static uint32_t  s_notice_seq;
 
 /* ---------------------------------------------------------------------------
  *  보조
@@ -193,8 +198,13 @@ static cJSON *build_state(const struct shared_ctx *ctx)
     lv = cJSON_AddObjectToObject(o, "level");
     if (lv != NULL) {
         (void)cJSON_AddBoolToObject  (lv, "valid", ctx->level.valid != 0u);
+        /* roll/pitch 는 설치각을 뺀 **이탈** 이다(게이트가 보는 값과 동일).
+         * raw_* 는 중력벡터 각 그대로 — 둘을 같이 실어야 Qt 에서 "리그가
+         * 기울었나" 와 "IMU 마운트가 틀어졌나" 를 구분할 수 있다. */
         (void)cJSON_AddNumberToObject(lv, "roll_deg",  ctx->level.roll_deg);
         (void)cJSON_AddNumberToObject(lv, "pitch_deg", ctx->level.pitch_deg);
+        (void)cJSON_AddNumberToObject(lv, "raw_roll_deg",  ctx->level.raw_roll_deg);
+        (void)cJSON_AddNumberToObject(lv, "raw_pitch_deg", ctx->level.raw_pitch_deg);
     }
     (void)cJSON_AddNumberToObject(o, "ts", (double)unix_ts());
     return o;
@@ -351,7 +361,12 @@ static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
     if (!get_pair(o, "pan_ddeg", &p0, &p1) ||
         !get_pair(o, "tilt_ddeg", &t0, &t1) ||
         !get_int (o, "step_ddeg", &step)) {
-        publish_error(4, "ERR_OUT_OF_RANGE", "필수 필드 누락/형식 오류", false);
+        /* ⚠️ 예전에는 4(ERR_OUT_OF_RANGE)를 빌려 썼다. 그건 STM32 가 "스캔
+         *   범위 밖" 에 쓰는 코드라, Qt 가 code=4 를 받고도 STM 이 거절한
+         *   건지 데몬이 페이로드를 못 읽은 건지 알 수 없었다. 데몬 자신의
+         *   판정이므로 100번대를 쓴다. */
+        publish_error((int)NOTICE_BAD_REQUEST, "ERR_BAD_REQUEST",
+                      "필수 필드 누락/형식 오류", false);
         core_log(ctx->core, "MQTT", "cmd/scan 파싱 실패");
         return;
     }
@@ -582,6 +597,14 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
         }
     }
 
+    /* 코어/모듈이 스스로 판단한 사건(수평 게이트 거부·홈 타임아웃·업로드 실패).
+     * STM 이 올린 오류와 경로가 다르다 — 그쪽은 아래 link.last_err 다. */
+    if (ctx->notice.seq != s_notice_seq) {
+        s_notice_seq = ctx->notice.seq;
+        publish_error((int)ctx->notice.code, ctx->notice.name,
+                      ctx->notice.msg, ctx->notice.fatal != 0u);
+    }
+
     /* STM 오류가 새로 뜨면 이벤트로 알린다 (같은 코드 반복 발행 방지) */
     if ((ctx->link.last_err != 0u) && (ctx->link.last_err != s_last_err_sent)) {
         publish_error(ctx->link.last_err, "STM_ERROR", "STM32 오류 통지",
@@ -616,10 +639,10 @@ static void mqtt_on_state(struct shared_ctx *ctx,
         s_user_disarm = false;
 
         if (ctx->link.link_alive == 0u) {
-            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+            publish_error((int)NOTICE_DISARM, "ERR_DISARM",
                           "링크 두절 — 배선/전원 확인", true);
         } else if (ctx->link.last_err != 0u) {
-            publish_error(ERRC_LINK_DEAD, "ERR_DISARM",
+            publish_error((int)NOTICE_DISARM, "ERR_DISARM",
                           "STM32 오류로 안전정지", true);
         } else if (user) {
             /* 사용자가 직접 눌렀다. 장비가 고장난 건 아니지만 **REARM 전까지
@@ -627,7 +650,7 @@ static void mqtt_on_state(struct shared_ctx *ctx,
              * 있을 수 있어 "누가 세웠다" 도 남겨야 한다.
              * 이름은 Qt 데모 브리지와 맞춘다 — 같은 사건이 실물/데모에서
              * 다르게 보이면 UI 를 두 번 만들게 된다. */
-            publish_error(ERRC_LINK_DEAD, "USER_DISARM",
+            publish_error((int)NOTICE_DISARM, "USER_DISARM",
                           "사용자 안전정지", true);
         } else {
             /* 스캔 후 되감기 유예 뒤의 자동 DISARM = 정상 종료.

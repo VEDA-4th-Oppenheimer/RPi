@@ -939,6 +939,11 @@ const char *scan_out_path(const struct scan_out *o)
     return (o != NULL) ? o->pc_path : "";
 }
 
+const char *scan_out_json_path(const struct scan_out *o)
+{
+    return (o != NULL) ? o->js_path : "";
+}
+
 void scan_out_set_home(struct scan_out *o,
                        uint16_t pan_raw, uint16_t tilt_raw,
                        int16_t pan_ddeg, int16_t tilt_ddeg)

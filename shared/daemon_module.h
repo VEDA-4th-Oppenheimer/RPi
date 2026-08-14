@@ -19,7 +19,7 @@
  *  모듈 담당 (v3):
  *    - mqtt_module : 이현우 코어 + 이광진 협업 (RPi Mosquitto 브로커 클라이언트.
  *                    scan/start·stop 수신 -> FSM 트리거, scan/status·done 발행)
- *    - imu_module  : 송영빈 (/dev/imu MPU-6050 read -> roll/pitch 제공.
+ *    - imu_module  : 송영빈 (/dev/imu ICM-20948 read -> roll/pitch 제공.
  *                    수평 게이트 "판정"은 코어가 한다)
  *    - led_module  : 이현우 (/dev/led = 상태 LED x3 + 액티브 부저 x1)
  *
@@ -34,8 +34,16 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>   /* notice_post 의 strncpy */
 
-#define DAEMON_MODULE_VERSION   3u
+/* v3 -> v4 (2026-08-13)
+ *   · scan_result 에 json_path 추가 — 카메라 업로드가 .pcd 경로에서 확장자를
+ *     조작해 추론하지 않도록. 규칙이 두 곳에 흩어지면 파일명 규칙을 바꿀 때
+ *     한쪽만 고쳐진다.
+ *   · daemon_notice 신설 — 코어/모듈이 "자기가 판단한 것"을 Qt 에 알리는 통로.
+ *     STM 이 올린 오류는 link.last_err 로 흐르는데, 코어 자신의 판정(수평 게이트
+ *     거부·홈 타임아웃·업로드 실패)은 전달 경로가 없어 로그로만 끝났다. */
+#define DAEMON_MODULE_VERSION   4u
 
 /* ---------------------------------------------------------------------------
  *  1. 시스템 상태머신 (v3 스캐너)
@@ -101,17 +109,59 @@ struct scan_progress {
 /* 스캔 결과 요약. 코어가 EXPORT 진입 시 씀, mqtt_module 이 scan/done 발행 */
 struct scan_result {
     char     path[256];         /* 생성된 포인트클라우드 파일 경로 (.pcd)     */
+    /* 원시 측정 JSON 경로. 카메라 단이 받는 것은 **이쪽**이다(.pcd 아님).
+     * 코어가 채운다 — 소비자가 .pcd 경로에서 확장자를 갈아끼워 추론하면
+     * 파일명 규칙이 두 곳에 살게 되어 한쪽만 바뀔 때 조용히 깨진다. */
+    char     json_path[256];
     uint32_t point_count;       /* 파일에 기록된 점 수                        */
     uint32_t stm_reported;      /* STM 이 CMD_SCAN_DONE 으로 보고한 점 수     */
     uint8_t  valid;             /* 1=파일 준비 완료                           */
 };
 
+/* 코어/모듈이 스스로 판단한 사건을 Qt 에 알리는 통로 (v4 신설).
+ *
+ * ★ 왜 필요한가: STM 이 올린 오류는 link.last_err 로 흐르지만, **데몬 자신의
+ *   판정**은 갈 곳이 없었다. 수평 게이트가 스캔을 거부해도, 홈이 20초 무응답으로
+ *   취소돼도, 카메라 업로드가 실패해도 로그에만 남아서 Qt 는 "명령을 보냈는데
+ *   아무 일도 안 일어난" 것으로 보였다.
+ *
+ * 사용법: 쓰는 쪽이 code/name/msg 를 채우고 seq 를 **증가**시킨다. mqtt_module 이
+ * seq 변화를 감지해 adts/event/error 로 발행한다. 같은 사건이 반복될 때도
+ * 구분되도록 값이 아니라 seq 로 에지를 잡는다. */
+struct daemon_notice {
+    uint32_t seq;               /* 증가 = 새 통지. 0 = 아직 없음              */
+    uint16_t code;              /* 100+ = 데몬 자체 판정 (STM 코드와 겹침 회피) */
+    uint8_t  fatal;             /* 1 = 작업 중단, 사용자 개입 필요             */
+    char     name[32];          /* 예: "ERR_NOT_LEVEL"                        */
+    char     msg[128];
+};
+
+/* 데몬 자체 판정 코드 (protocol.h 의 proto_err_code 와 겹치지 않게 100 부터) */
+/* ★ 100 부터 시작하는 이유 = Qt 가 출처를 코드 하나로 가릴 수 있게:
+ *      code <  100  STM32 가 CMD_ERROR 로 올린 것 (protocol.h proto_err_code)
+ *      code >= 100  데몬이 스스로 판단한 것 (여기)
+ *   ⚠️ 이 규칙을 깨고 데몬이 1~6 을 빌려 쓰면 안 된다. 실제로 페이로드 파싱
+ *     오류가 4(ERR_OUT_OF_RANGE)를 빌려 쓰고 있었는데, Qt 는 그게 STM32 의
+ *     "스캔 범위 밖" 인지 데몬의 "필드 누락" 인지 구분할 수 없었다. */
+#define NOTICE_DISARM        100u   /* 안전정지 (링크 두절 / STM 오류 / 사용자) */
+#define NOTICE_HOME_TIMEOUT  101u   /* 홈 무응답으로 요청 취소                  */
+#define NOTICE_NOT_LEVEL     102u   /* 수평 게이트가 스캔을 거부                */
+#define NOTICE_UPLOAD_FAIL   103u   /* 카메라 업로드 실패 (파일은 로컬에 남음)  */
+#define NOTICE_BAD_REQUEST   104u   /* cmd 페이로드 필드 누락/형식 오류         */
+
 /* 거치 수평 상태. imu_module 이 중력벡터에서 산출해 씀, 코어가 게이트 판정.
  * ※ 방식 A(게이트): 임계값 초과면 SCANNING 진입 거부. 좌표 보정 아님.
  *   roll/pitch 원본은 향후 보정(방식 B) 확장 대비로 로그에 보존한다. */
 struct level_state {
+    /* 설치각 오프셋을 뺀 값 = "기준 자세로부터의 이탈". 게이트 판정과 Qt
+     * 표시가 둘 다 이걸 쓴다(두 곳이 같은 의미를 봐야 혼선이 없다). */
     float    roll_deg;          /* 좌우 기울기                                */
     float    pitch_deg;         /* 앞뒤 기울기                                */
+    /* 오프셋을 빼기 전 중력벡터 그대로의 각. 방식 B(좌표 보정)로 갈 때는
+     * 이쪽이 필요하다 — 보정 대상은 "이탈" 이 아니라 실제 기울기다.
+     * 오프셋이 0 이면 위 두 값과 같다. */
+    float    raw_roll_deg;
+    float    raw_pitch_deg;
     uint8_t  valid;             /* 1=최근 측정값 유효 (IMU 없으면 0)          */
 };
 
@@ -145,12 +195,86 @@ struct shared_ctx {
      * IDLE 에서만 받는다. 진행 상황은 link.homed 가 0 -> 1 로 알린다. */
     uint8_t  req_home;              /* mqtt: cmd/home 수신                    */
 
+    /* 코어/모듈 -> mqtt (event/error 발행). 위 daemon_notice 주석 참조.
+     * 쓰는 쪽은 notice_post() 를 쓴다 — seq 증가를 빠뜨리면 조용히 안 나간다. */
+    struct daemon_notice notice;
+
     void    *core;                  /* 코어 핸들 (core_* API 호출용)          */
 };
 
 /* 수평 게이트 임계값 (deg). 이 값을 넘으면 코어가 SCANNING 진입을 거부한다.
- * ※ 실측 튜닝 대상(미결). IMU 표준편차가 0.2~0.3도 수준이라 1.5도면 여유 있음. */
-#define LEVEL_GATE_MAX_DEG   3.0f
+ *
+ * ⚠️ **지금 이 값은 게이트를 사실상 무력화한 브링업 설정이다 (2026-08-13).**
+ *
+ *   IMU 가 킷 축에 대해 비뚤게 붙어 있어 실제 기울기를 작게 보고했다. 실측 대조:
+ *       스캔 바닥평면으로 잰 실제 기울기   3.6도  (6회 반복, 편차 0.05도)
+ *       IMU 가 보고한 값                  1.1도   ← MPU-6050 기준, 아래 참조
+ *   그래서 임계를 6.0 으로 둔 것은 "3.6도 기울어진 킷을 통과시키기 위해서"이지
+ *   6도까지 허용해도 된다는 뜻이 아니다. 지금 이 게이트는 아무것도 막지 않는다.
+ *
+ * ⚠️ **캘리브 데이터를 뽑기 전에 반드시 되돌릴 것.** 기울어진 채 찍으면 산출물의
+ *   바닥이 통째로 3.6도 돌아간 상태로 카메라 단에 넘어간다.
+ *
+ *   되돌리는 순서:
+ *     ① 킷 거치 자세 교정 — IMU 말고 **바닥평면 기울기**를 보고 맞춘다.
+ *        내리막 방위 232도 쪽이 낮다(받침 지름 200mm 기준 심 약 12.6mm).
+ *     ② IMU 장착 오프셋 상수를 넣어 level 값을 실제와 맞춘다.
+ *     ③ 이 값을 3.0f 이하로 되돌린다.
+ *   ①~③ 전까지 이 게이트의 통과는 "수평이 확인됐다"는 뜻이 아니다.
+ *
+ * ─── 2026-08-14 갱신 (IMU 교체 + 오프셋 도입) ──────────────────────────────
+ *   ⚠️ 위의 "IMU 1.1도 / 장착 2.7도 어긋남" 은 **MPU-6050 때 수치라 폐기됐다.**
+ *     ICM-20948 로 바꾸면서 패키지 축·실장 방향이 달라져 보고값이 통째로 변했다.
+ *     교체 직후 raw roll=+4.26 pitch=+3.74 였다가, 같은 날 roll=-3.05 pitch=+3.91
+ *     로 튀었다(마운트 유동 — 아래 IMU_INSTALL_*_DEG 주석). 센서를 고정한 뒤
+ *     후자 기준으로 오프셋을 잡았다.
+ *
+ *   ⚠️ ② 는 아래 IMU_INSTALL_*_DEG 로 **넣었지만 ① 을 하기 전에 넣었다.**
+ *     즉 3.6도 기울어진 그 자세를 "기준" 으로 선언해 버린 상태다. 그래서
+ *     level 값은 이제 0 근처로 나오지만 킷은 여전히 3.6도 기울어 있다 —
+ *     **게이트를 3.0 으로 되돌려도(③) 아무것도 안 막는 것은 그대로다.**
+ *     ① 을 한 뒤 IMU_INSTALL_*_DEG 를 다시 잡아야 이 순서가 완성된다.
+ *
+ *   ▸ 참고: 바닥평면으로 재는 방식(①)이 IMU 보다 정확하다 — 편차 0.05도 대
+ *     IMU 잡음 0.2~0.3도, 게다가 장착각이라는 미지수가 없다. 게이트는 "사람이
+ *     현장에서 대충 맞췄나" 를 보는 용도로 두고, 산출물의 기울기 판정·보정은
+ *     바닥평면을 기준으로 하는 편이 낫다. */
+#define LEVEL_GATE_MAX_DEG   6.0f
+
+/* --- IMU 설치각 오프셋 (deg) ----------------------------------------------
+ *  IMU 가 기구에 정확히 수평으로 붙어 있지 않으므로, 그 **장착 각도**를 여기서
+ *  빼낸다. 뺀 뒤의 값이 곧 "기준 자세로부터의 이탈" 이고 게이트는 그걸 본다.
+ *
+ *  ★ 이 값이 뜻하는 것을 정확히 알고 쓸 것 ★
+ *    이 상수는 "이 자세가 수평이다" 라고 **선언**한다. 그러므로 채워 넣을 때의
+ *    자세가 실제로 수평이 아니었다면, 게이트는 그 기울어진 자세를 기준으로
+ *    이탈만 재게 된다 — 즉 리그가 처음부터 기울어 있어도 통과시킨다.
+ *    게이트를 "수평 보장" 으로 쓰려면 아래 절차의 ① 을 반드시 해야 한다.
+ *
+ *  실측 절차:
+ *    ① 수평기를 **팬축 마운트** 에 대고 기구를 실제로 수평으로 맞춘다
+ *       (이 단계를 건너뛰면 아래 값은 그냥 "지금 자세" 일 뿐이다)
+ *    ② driver/imu_test 를 띄우고 'z' 를 누른다 — 20샘플 평균으로 영점을 잡고
+ *       그 값을 화면에 찍어준다
+ *    ③ 찍힌 Roll/Pitch 를 여기에 넣고 데몬을 다시 빌드한다
+ *
+ *  ⚠️ 지금 값(2026-08-14)은 ① 없이 그때 자세를 그대로 넣은 것이다. 즉
+ *    **아직 "수평 보장" 이 아니라 "그때 자세 기준 이탈" 을 재고 있다.**
+ *    수평기로 맞춘 뒤 ②③ 으로 다시 잡을 것.
+ *
+ *  ⚠️ **이 상수는 IMU 마운트가 안 움직인다는 전제 위에 서 있다.**
+ *    브래킷 다리가 한쪽뿐이라 실제로 움직인 이력이 있다 — 같은 날 두 판독에서
+ *    roll 이 +4.08 -> -3.05 로 **7.1도** 튀었다(pitch 는 +3.79 -> +3.91 로 거의
+ *    불변). 한 점 지지에서 남는 회전 자유도 하나와 정확히 맞는 패턴이다.
+ *    아래 값은 **센서를 물리적으로 고정한 뒤** 잰 것을 전제로 한다.
+ *
+ *    게이트가 갑자기 막거나 갑자기 통과하기 시작하면 리그 자세가 아니라
+ *    이 마운트를 먼저 의심할 것. raw_roll_deg/raw_pitch_deg 를 같이 발행하는
+ *    이유가 이것이다 — 보정 후 값만 보면 마운트가 틀어져도 알 수 없다.
+ *
+ *  0 으로 두면 오프셋 없이 중력벡터 각 그대로 판정한다(종전 동작). */
+#define IMU_INSTALL_ROLL_DEG   -3.0f
+#define IMU_INSTALL_PITCH_DEG   4.0f
 
 /* ---------------------------------------------------------------------------
  *  3. 모듈 인터페이스
@@ -207,6 +331,7 @@ extern "C" {
 const struct daemon_module *mqtt_module_get(void);   /* 이현우 + 이광진 협업 */
 const struct daemon_module *imu_module_get(void);    /* 송영빈               */
 const struct daemon_module *led_module_get(void);    /* 이현우               */
+const struct daemon_module *camera_module_get(void); /* 이현우 + 이영민      */
 
 /* ---------------------------------------------------------------------------
  *  5. 코어 API  (모듈이 코어에 요청할 때 호출)
@@ -221,6 +346,37 @@ int core_request_state(void *core, daemon_state_t want);
 
 /* 구조화 로그 (감사/이벤트 로그). 코어가 stderr(추후 파일+syslog) 로 남김. */
 void core_log(void *core, const char *event, const char *fmt, ...);
+
+/* 블로킹 작업(수십 초짜리 파일 업로드 등)을 마친 뒤 heartbeat 기준선을 지금으로
+ * 되맞춘다.
+ *
+ * ★ 없으면: 데몬은 자기 CLOCK_MONOTONIC 으로 "300ms 넘게 PONG 없음 = link_dead"
+ *   를 판정한다. 루프가 업로드 때문에 30초 멈췄다 깨어나면 그 간격을 통신 두절로
+ *   오판해 **매번 DISARM** 이 걸린다. 링크는 멀쩡한데 성공한 스캔마다 Qt 에
+ *   빨간 오류가 뜬다. "내가 바빴던 것이지 링크가 죽은 게 아니다" 를 명시한다.
+ *
+ * ⚠️ 진짜 두절을 가릴 수 있으므로, **자기가 오래 블로킹했다는 것을 아는 쪽**만
+ *   부를 것. 주기 코드에서 습관적으로 부르면 heartbeat 가 무력해진다. */
+void core_hb_reprime(void *core);
+
+/* 통지 게시. seq 를 증가시켜 mqtt_module 이 에지로 잡게 한다.
+ * 헤더 인라인인 이유 = 코어와 모듈 양쪽에서 쓰는데 링크 대상이 갈리지 않게. */
+static inline void notice_post(struct shared_ctx *ctx, uint16_t code,
+                               uint8_t fatal, const char *name, const char *msg)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->notice.code  = code;
+    ctx->notice.fatal = fatal;
+    /* ⚠️ strncpy 는 소스가 길면 NUL 을 안 붙인다. 마지막 바이트를 직접
+     *   0 으로 눌러 잘림이 항상 종료되게 한다. */
+    strncpy(ctx->notice.name, name, sizeof(ctx->notice.name) - 1u);
+    ctx->notice.name[sizeof(ctx->notice.name) - 1u] = '\0';
+    strncpy(ctx->notice.msg, msg, sizeof(ctx->notice.msg) - 1u);
+    ctx->notice.msg[sizeof(ctx->notice.msg) - 1u] = '\0';
+    ctx->notice.seq++;              /* ★ 마지막에 — 위 필드가 다 채워진 뒤 */
+}
 
 #ifdef __cplusplus
 }  /* extern "C" */
