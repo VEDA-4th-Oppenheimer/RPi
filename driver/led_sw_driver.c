@@ -190,7 +190,7 @@ static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
       pwm_disable(dev->pwm_buzzer);
     }
   } else if (gpio_is_valid(dev->pin_buzzer)) {
-    gpio_set_value(dev->pin_buzzer, 0);
+    gpio_set_value(dev->pin_buzzer, on ? 1 : 0);
   }
 }
 
