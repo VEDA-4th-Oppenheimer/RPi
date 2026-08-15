@@ -93,8 +93,8 @@
 #define ENV_KEY       "ADTS_CAM_KEY"
 
 #define DEF_CONF      "/etc/adts/camera.conf"
-#define DEF_HOST      "172.20.32.29"
-#define DEF_PORT      8081
+#define DEF_HOST      "172.20.32.43"        /* DHCP 라 바뀐다 — conf 로 고친다 */
+#define DEF_PORT      2222                  /* 수신 앱이 고정으로 여는 포트 */
 #define DEF_NAME      "adts-camera"          /* 카메라 인증서 SAN 의 DNS 이름 */
 
 /* MQTT 와 같은 CA·같은 클라이언트 인증서를 쓴다. 신뢰 뿌리가 하나여야
@@ -181,8 +181,8 @@ static bool name_is_acceptable(const char *n)
  *  설정 파일
  *
  *    # 주석
- *    host      = 172.20.32.29
- *    port      = 8081
+ *    host      = 172.20.32.43
+ *    port      = 2222
  *    name      = adts-camera
  *    timeout_s = 60
  *    disable   = 0

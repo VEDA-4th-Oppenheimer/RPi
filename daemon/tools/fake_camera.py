@@ -6,7 +6,7 @@ fake_camera.py — 카메라 수신측(lidar_json_receiver) 대역
 프로토콜만 흉내내고, 받은 파일은 검증만 하고 버린다(--save 로 저장).
 
   사용:
-      python3 fake_camera.py --certs /etc/adts/certs [--port 8081] [--once]
+      python3 fake_camera.py --certs /etc/adts/certs [--port 2222] [--once]
 
   ⚠️ 이 스크립트는 **카메라 인증서(adts-camera.crt/.key)** 로 서버를 연다.
     발급:  sudo bash broker/gen-certs.sh --server adts-camera
@@ -73,7 +73,7 @@ def serve_one(tls_sock, save):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--certs", default="/etc/adts/certs")
-    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--port", type=int, default=2222)
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--name", default="adts-camera", help="서버 인증서 이름")
     ap.add_argument("--save", action="store_true", help="받은 파일을 저장한다")
