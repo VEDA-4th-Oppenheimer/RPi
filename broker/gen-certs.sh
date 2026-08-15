@@ -50,6 +50,7 @@ usage() {
 사용:
   bash gen-certs.sh <RPi_IP> [출력디렉터리]        # 전체 발급 (최초 1회)
   bash gen-certs.sh --client <CN> [출력디렉터리]   # 클라이언트 인증서 1개 추가
+  bash gen-certs.sh --server <CN> [출력디렉터리]   # 서버 인증서 (카메라 등)
 
   bash gen-certs.sh --new-token <라벨>             # 1회용 발급 토큰 생성
   bash gen-certs.sh --list-tokens                  # 미사용 토큰 목록
@@ -159,6 +160,76 @@ if [ "${1:-}" = "--revoke" ]; then
     echo "※ 이미 발급받아 간 인증서는 그대로 유효합니다 — 그건 ACL 에서 빼야 합니다:"
     echo "   /etc/mosquitto/conf.d/adts.acl 의 'user qt-console-${LABEL}' 블록 삭제 후"
     echo "   sudo systemctl reload mosquitto"
+    exit 0
+fi
+
+# ── 모드 ④ : 서버 인증서 발급 (카메라 등, 접속을 **받는** 쪽) ────────────────
+#
+#  왜 --client 로는 안 되나:
+#    --client 는 extendedKeyUsage=clientAuth 만 넣는다. 그 인증서를 서버로 세우면
+#    접속하는 쪽이 용도 불일치로 거부한다. 서버는 serverAuth + SAN 이 필요하다.
+#
+#  ★ SAN 에 IP 를 넣지 않는다. 카메라도 RPi 도 DHCP 라 주소가 계속 바뀌는데,
+#    IP SAN 을 박으면 주소가 바뀔 때마다 인증서를 다시 발급해야 한다. 대신
+#    **고정된 이름**을 넣고 접속하는 쪽이 그 이름으로 검증한다(SSL_set1_host).
+#    DNS 에 실제로 등록될 필요는 없다 — 신원 라벨로만 쓴다.
+#
+#    즉 주소는 설정 파일이 알려주고, 신원은 인증서가 증명한다. 둘을 분리했기
+#    때문에 IP 가 매일 바뀌어도 인증서는 그대로다.
+#
+#  주소를 고정할 수 있게 되면(전용 링크 등) ADTS_EXTRA_SAN 으로 추가한다:
+#      ADTS_EXTRA_SAN="IP:192.168.50.10" bash gen-certs.sh --server adts-camera
+if [ "${1:-}" = "--server" ]; then
+    CN="${2:-}"
+    OUT="${3:-/etc/adts/certs}"
+    [ -n "$CN" ] || usage
+    check_label "$CN"
+
+    cd "$OUT" 2>/dev/null || { echo "출력 디렉터리가 없습니다: $OUT" >&2; exit 1; }
+    [ -f ca.crt ] && [ -f ca.key ] || {
+        echo "$OUT 에 ca.crt/ca.key 가 없습니다. 먼저 전체 발급을 실행하십시오." >&2; exit 1; }
+    [ -e "$CN.crt" ] && { echo "이미 존재합니다: $OUT/$CN.crt (지우고 다시 실행)" >&2; exit 1; }
+
+    SAN="DNS:$CN"
+    [ -n "${ADTS_EXTRA_SAN:-}" ] && SAN="$SAN,$ADTS_EXTRA_SAN"
+
+    TMP_CNF="$(mktemp)"
+    trap 'rm -f "$TMP_CNF"' EXIT
+    cat > "$TMP_CNF" <<EOF
+[req]
+distinguished_name = dn
+[dn]
+[v3_server]
+basicConstraints = CA:FALSE
+keyUsage         = digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName   = $SAN
+EOF
+
+    openssl req -newkey rsa:2048 -nodes -keyout "$CN.key" -out "$CN.csr" \
+        -subj "/CN=$CN" -config "$TMP_CNF" 2>/dev/null
+    openssl x509 -req -in "$CN.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
+        -days "$DAYS" -out "$CN.crt" -extfile "$TMP_CNF" -extensions v3_server 2>/dev/null
+    rm -f "$CN.csr" ca.srl
+
+    chmod 600 "$CN.key"
+    chmod 644 "$CN.crt"
+
+    cat <<EOF
+발급 완료 (서버 인증서, CN=$CN)
+  $OUT/$CN.crt      SAN = $SAN
+  $OUT/$CN.key
+
+카메라(수신측)에 넘길 것 — 3개:
+  $CN.crt   $CN.key   ca.crt
+
+  ca.crt 는 카메라가 **데몬의 클라이언트 인증서를 검증**하는 데 쓴다(mTLS).
+  ⚠️ ca.key 는 절대 넘기지 말 것.
+
+데몬 쪽은 발급이 필요 없다 — daemon.crt/daemon.key 를 이미 갖고 있다.
+데몬이 검증할 이름은 위 SAN 의 DNS 값이다:
+  /etc/adts/camera.conf 의  name = $CN
+EOF
     exit 0
 fi
 
