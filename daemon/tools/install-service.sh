@@ -134,6 +134,15 @@ say "유닛 설치: /etc/systemd/system/adts-daemon.service"
 install -Dm644 "$REPO/daemon/adts-daemon.service" /etc/systemd/system/adts-daemon.service
 systemctl daemon-reload
 
+# 카메라 접속 설정. ⚠️ **덮어쓰지 않는다** — 현장에서 사람이 고쳐 넣은 IP 가
+# 들어있는 파일이라, 배포할 때마다 예제값으로 되돌리면 그날 스캔이 다 실패한다.
+if [ ! -e /etc/adts/camera.conf ]; then
+    install -Dm644 "$REPO/daemon/camera.conf.example" /etc/adts/camera.conf
+    echo "   /etc/adts/camera.conf 생성 — ⚠ host 를 실제 카메라 IP 로 고칠 것"
+else
+    echo "   /etc/adts/camera.conf 유지 (host = $(awk -F= '/^[[:space:]]*host/{gsub(/ /,"",$2); print $2}' /etc/adts/camera.conf))"
+fi
+
 # 인증서를 서비스 사용자가 읽을 수 있는지 미리 본다. 여기서 안 잡으면 데몬이
 # 뜬 뒤 mosquitto_tls_set 이 MOSQ_ERR_INVAL 로 실패하는데, 그 에러 메시지가
 # "Invalid function arguments" 라 권한 문제로 안 보인다 — 실제로 반나절 걸렸다.

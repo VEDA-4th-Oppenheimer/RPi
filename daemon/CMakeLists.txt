@@ -61,6 +61,21 @@ add_executable(adts_daemon
 #    맥 크로스 툴체인 sysroot 에는 aarch64 용 패키지가 없어서, REQUIRED 로 두면
 #    CLion 이 configure 단계에서 실패해 인덱싱조차 안 된다. 실제 배포 바이너리는
 #    Docker(대상과 같은 glibc) 에서 굽고, 크로스 경로는 편집·인덱싱용이다.
+#  OpenSSL      : 카메라 업로드 mTLS (camera_module)
+#  ⚠️ 없으면 업로드를 **비활성**으로 컴파일한다. 평문으로 되돌리지 않는다 —
+#    보안 기능이 조용히 꺼진 채 도는 것이 실패보다 나쁘다. 스캔 파일은 로컬에
+#    남으므로 잃는 것은 없다.
+find_package(OpenSSL)
+if(OpenSSL_FOUND)
+    target_link_libraries(adts_daemon OpenSSL::SSL OpenSSL::Crypto)
+    message(STATUS "카메라 업로드: mTLS 활성 (OpenSSL ${OPENSSL_VERSION})")
+else()
+    target_compile_definitions(adts_daemon PRIVATE ADTS_NO_TLS=1)
+    message(WARNING
+        "OpenSSL 을 찾지 못해 카메라 업로드를 비활성으로 빌드합니다.\n"
+        "  배포용은 Docker 에서 빌드하십시오:  apt install libssl-dev")
+endif()
+
 find_library(MOSQUITTO_LIB mosquitto)
 find_library(CJSON_LIB     cjson)
 
