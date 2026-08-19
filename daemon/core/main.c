@@ -420,6 +420,16 @@ static void core_read_state(struct core *c)
     c->ctx.link.homed         = ((st.flags & STF_HOMED)    != 0u) ? 1u : 0u;
     c->ctx.link.scanning      = ((st.flags & STF_SCANNING) != 0u) ? 1u : 0u;
     c->ctx.link.last_err      = st.last_err;
+    c->ctx.link.last_err_axis = st.last_err_axis;
+
+    /* proto v6 진단. status_seen 이 0 이면 아래 값은 "모른다" 이지 "정상" 이
+     * 아니다 — 구버전 펌웨어이거나 아직 첫 CMD_STATUS 주기(1초)가 안 왔다. */
+    c->ctx.link.status_seen   = st.status_seen;
+    c->ctx.link.tx_fail       = st.tx_fail;
+    c->ctx.link.rx_ovf        = st.rx_ovf;
+    c->ctx.link.enc_retry     = st.enc_retry;
+    c->ctx.link.lidar_drop    = st.lidar_drop;
+    c->ctx.link.reject_busy   = st.reject_busy;
 
     if ((st.flags & STF_HOMED) != 0u) {
         scan_out_set_home(c->out, st.home_pan_encoder_raw,

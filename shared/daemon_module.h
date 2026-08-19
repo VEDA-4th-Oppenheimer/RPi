@@ -36,14 +36,19 @@
 #include <stddef.h>
 #include <string.h>   /* notice_post 의 strncpy */
 
-/* v3 -> v4 (2026-08-13)
+/* v4 -> v5 (2026-08-19, proto v6 동반)
+ *   · link_status 에 STM 진단 카운터와 오류 축(last_err_axis) 추가.
+ *     STM 이 CMD_STATUS 를 실제로 주기 송신하기 시작하면서 값이 생겼다 —
+ *     v5 까지 그 프레임은 정의만 있고 한 번도 오지 않았다.
+ *
+ * v3 -> v4 (2026-08-13)
  *   · scan_result 에 json_path 추가 — 카메라 업로드가 .pcd 경로에서 확장자를
  *     조작해 추론하지 않도록. 규칙이 두 곳에 흩어지면 파일명 규칙을 바꿀 때
  *     한쪽만 고쳐진다.
  *   · daemon_notice 신설 — 코어/모듈이 "자기가 판단한 것"을 Qt 에 알리는 통로.
  *     STM 이 올린 오류는 link.last_err 로 흐르는데, 코어 자신의 판정(수평 게이트
  *     거부·홈 타임아웃·업로드 실패)은 전달 경로가 없어 로그로만 끝났다. */
-#define DAEMON_MODULE_VERSION   4u
+#define DAEMON_MODULE_VERSION   5u
 
 /* ---------------------------------------------------------------------------
  *  1. 시스템 상태머신 (v3 스캐너)
@@ -214,6 +219,19 @@ struct link_status {
     uint8_t  scanning;          /* 1=STM 이 스캔 중 (STF_SCANNING)            */
     uint8_t  link_alive;        /* 1=heartbeat 정상                           */
     uint8_t  last_err;          /* 최근 CMD_ERROR code (enum proto_err_code)  */
+    uint8_t  last_err_axis;     /* 그 오류의 축 (proto v6, enum proto_err_axis)*/
+
+    /* --- STM 진단 카운터 (proto v6, CMD_STATUS 1초 주기) -------------------
+     * 주의: status_seen 이 0 이면 아래 값은 **의미가 없다.** 구버전 펌웨어가
+     *   올라가 있거나 아직 첫 주기가 안 온 것이다. 0 을 "정상" 으로 읽으면
+     *   안 된다 — 그건 "모른다" 다. */
+    uint8_t  status_seen;       /* 1=CMD_STATUS 를 한 번이라도 받았다         */
+    uint16_t tx_fail;           /* STM UART 송신 실패                         */
+    uint16_t rx_ovf;            /* STM 수신 링버퍼 오버플로.                  */
+                                /*   0 이 아니면 STM 메인루프가 오래 막혔다   */
+    uint16_t enc_retry;         /* 엔코더 판독 재시도 (양축 합)               */
+    uint16_t lidar_drop;        /* 라이다 큐 넘침으로 버린 샘플               */
+    uint16_t reject_busy;       /* 진행 중이라 거절한 SCAN_START              */
 };
 
 struct shared_ctx {

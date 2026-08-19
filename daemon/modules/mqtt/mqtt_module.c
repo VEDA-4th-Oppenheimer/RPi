@@ -198,6 +198,25 @@ static cJSON *build_state(const struct shared_ctx *ctx)
     (void)cJSON_AddNumberToObject(o, "cur_pan_ddeg",  ctx->link.cur_pan_ddeg);
     (void)cJSON_AddNumberToObject(o, "cur_tilt_ddeg", ctx->link.cur_tilt_ddeg);
     (void)cJSON_AddNumberToObject(o, "last_err",      ctx->link.last_err);
+    (void)cJSON_AddNumberToObject(o, "last_err_axis", ctx->link.last_err_axis);
+
+    /* STM 진단 (proto v6). 중첩 객체로 둔다 — level 과 같은 꼴이고, 진단은
+     * 진단끼리 묶여 있어야 나중에 늘릴 때 계약이 지저분해지지 않는다.
+     *
+     * 주의: valid 가 false 면 나머지 값은 **모른다** 는 뜻이다(구버전 펌웨어
+     *   이거나 첫 주기 전). 0 을 "정상" 으로 읽으면 안 된다. */
+    {
+        cJSON *dg = cJSON_AddObjectToObject(o, "diag");
+
+        if (dg != NULL) {
+            (void)cJSON_AddBoolToObject  (dg, "valid", ctx->link.status_seen != 0u);
+            (void)cJSON_AddNumberToObject(dg, "tx_fail",     ctx->link.tx_fail);
+            (void)cJSON_AddNumberToObject(dg, "rx_ovf",      ctx->link.rx_ovf);
+            (void)cJSON_AddNumberToObject(dg, "enc_retry",   ctx->link.enc_retry);
+            (void)cJSON_AddNumberToObject(dg, "lidar_drop",  ctx->link.lidar_drop);
+            (void)cJSON_AddNumberToObject(dg, "reject_busy", ctx->link.reject_busy);
+        }
+    }
 
     lv = cJSON_AddObjectToObject(o, "level");
     if (lv != NULL) {

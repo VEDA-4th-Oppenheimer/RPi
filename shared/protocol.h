@@ -1,5 +1,5 @@
 /* ============================================================================
- *  protocol.h  --  RPi <-> STM32 UART 통신 계약 (공용 헤더)  [v5 스캐너]
+ *  protocol.h  --  RPi <-> STM32 UART 통신 계약 (공용 헤더)  [v6 스캐너]
  * ----------------------------------------------------------------------------
  *  이 파일은 세 곳에서 "그대로 동일하게" 사용된다:
  *    1) RPi 커널 드라이버 (/dev/turret)   - 프레임 조립/파싱
@@ -11,6 +11,9 @@
  *        스캔 스트림(SCAN_START/STOP/DATA/DONE) 추가. tilt 부호각 확장.
  *  핵심: v5: ① 스캔 점에 라이다 원시 품질 필드 추가 (6B -> 18B)
  *        ② CMD_HOMED 에 엔코더 원본값 payload 추가 (2축 HOME 확립용)
+ *  핵심: v6: ① 오류에 축(axis) 필드 — 어느 축이 문제인지 프로토콜이 나른다
+ *        ② ERR_BUSY / ERR_ENCODER 신설
+ *        ③ proto_status 확장 + STM 이 실제로 주기 송신 (진단 카운터)
  *
  *  담당: 이현우 (RPi↔STM32 프로토콜 관리)
  * ==========================================================================*/
@@ -41,7 +44,29 @@
  *     ② proto_homed 신설 — CMD_HOMED 가 엔코더 원본값을 함께 올린다.
  *        MT6701 은 절대 엔코더라 HOME 은 "읽기 1회"로 끝나며, 그 원본값이
  *        산출물 헤더의 provenance 가 된다. */
-#define PROTO_VERSION   5u
+/* v6 (2026-08-19)
+ *   왜 한 번에 묶었나 — 프로토콜 개정은 마스터 sha 변경 -> 4개 사본 동기 ->
+ *   push 순서(rpi main 먼저 -> STM32) -> 드라이버·데몬·Qt 반영까지 비용이
+ *   고정으로 든다. 나눠 하면 그 비용을 그만큼 반복해서 낸다.
+ *
+ *     ① proto_err 에 axis 추가 (1B -> 2B)
+ *        축을 나르는 필드가 없어서, 홈 실패 시 어느 축인지 알려고 **다른
+ *        오류코드를 빌려 쓰는** 브링업 장치(SCAN_HOME_AXIS_PROBE)를 두고
+ *        있었다. 빌린 코드는 그 코드가 진짜로 났을 때 오독을 부른다.
+ *        이제 코드는 "무엇이" 를, axis 는 "어디서" 를 말한다.
+ *     ② ERR_BUSY / ERR_ENCODER 신설 — 아래 enum 주석 참조.
+ *     ③ proto_status 5B -> 15B 로 확장하고 **STM 이 1초 주기로 실제 송신**한다.
+ *        지금까지 이 구조체는 정의만 있고 한 번도 보내진 적이 없었다. 그래서
+ *        드라이버의 STF_HOMED 는 한 번 서면 갱신될 일이 없었고, STM 을
+ *        리셋/재플래시하면 STM 은 홈이 풀렸는데 드라이버 캐시만 참으로 남았다.
+ *        진단 카운터(TX 실패/RX 오버플로/엔코더 재시도/라이다 drop/거절)도
+ *        여기 실린다 — 지금까지 그 값들은 계측만 되고 읽을 방법이 없었다.
+ *
+ *   PROTO_VERSION 자체는 여전히 와이어로 보내지 않는다. 4개 사본은 CI 의
+ *   drift-check 가 보장하므로 남는 위험은 "보드에 옛 펌웨어가 그대로" 인
+ *   경우뿐인데, 그건 버전 바이트보다 **드라이버의 payload 길이 불일치 경고**가
+ *   더 넓게(버전을 안 올리고 구조체만 바꾼 경우까지) 잡는다. */
+#define PROTO_VERSION   6u
 
 /* 1. 프레임 구조 상수 */
 #define PROTO_SOF            0xAAu
@@ -79,6 +104,26 @@ enum proto_err_code {
     ERR_OUT_OF_RANGE = 4,      /* 스캔 범위 밖                  */
     ERR_STALL        = 5,      /* 탈조 감지 (엔코더 대조 불일치)*/
     ERR_LIDAR        = 6,      /* 라이다 무응답/무효            */
+    /* v6 신설 */
+    ERR_BUSY         = 7,      /* 지금 상태에서 받을 수 없는 요청 */
+    ERR_ENCODER      = 8,      /* 엔코더 판독 실패 (I2C)          */
+};
+
+/* 오류가 난 축. proto_err.axis 에 실린다.
+ *
+ * 핵심: 코드는 "무엇이", axis 는 "어디서" 를 말한다. 이 필드가 없어서 홈 실패
+ *   시 어느 축인지 알려고 다른 오류코드를 빌려 쓰는 브링업 장치를 두고 있었다
+ *   (SCAN_HOME_AXIS_PROBE: 4=팬 / 6=틸트). 빌린 코드는 그 코드가 진짜로 났을
+ *   때 오독을 부르므로 v6 에서 정식 필드로 올린다. */
+/* 핵심: 비트 플래그다 — PAN=bit0, TILT=bit1, BOTH=둘 다.
+ *   축별 판정을 OR 로 합칠 수 있게 일부러 이렇게 잡았다:
+ *       axis = (ok_pan ? 0 : ERR_AXIS_PAN) | (ok_tilt ? 0 : ERR_AXIS_TILT)
+ *   값을 바꾸면 그 관용구가 조용히 깨진다. */
+enum proto_err_axis {
+    ERR_AXIS_NONE = 0,         /* 축과 무관한 오류 (CRC/LEN 등)  */
+    ERR_AXIS_PAN  = 1u << 0,
+    ERR_AXIS_TILT = 1u << 1,
+    ERR_AXIS_BOTH = (1u << 0) | (1u << 1),
 };
 
 /* 4. 각도 규약
@@ -196,16 +241,35 @@ struct proto_scan_done {
     proto_u32 point_count;  /* 상행한 총 점 수 (데몬이 유실 검증)*/
 } PROTO_PACKED;
 
-/* CMD_STATUS payload : STM -> RPi 현재 상태 (5B) */
+/* CMD_STATUS payload : STM -> RPi 현재 상태 + 진단 (15B, v6)
+ *
+ * 핵심: v6 부터 STM 이 **1초 주기로 실제 송신**한다. v5 까지는 이 구조체가
+ *   정의만 있고 한 번도 보내진 적이 없었고, 그래서 두 가지가 망가져 있었다:
+ *     ① 드라이버의 STF_HOMED 는 CMD_HOMED 때 서기만 하고 내려갈 일이 없었다.
+ *        STM 을 리셋/재플래시하면 STM 은 홈이 풀렸는데 캐시만 참으로 남아,
+ *        그 상태로 홈을 건너뛰면 SCAN_START 가 매번 거절됐다(실기 발생).
+ *     ② 아래 카운터들이 펌웨어 안에서 증가만 하고 읽을 방법이 없었다.
+ *
+ * 카운터는 u16 이고 포화(65535)해도 무해하다 — 거기까지 갔으면 이미 큰
+ * 문제이고, "값이 크다" 는 것만 알면 진단에 충분하다. u32 로 하면 25B 가 되어
+ * PROTO_MAX_PAYLOAD(24) 를 넘는다. */
 struct proto_status {
-    proto_s16 cur_pan_ddeg;  /* 현재 방위 (스텝카운트)         */
-    proto_s16 cur_tilt_ddeg;    /* 현재 고각 (엔코더, 부호)       */
-    proto_u8  flags;           /* bit0=homed, bit1=scanning      */
+    proto_s16 cur_pan_ddeg;    /* 현재 방위 (스텝카운트)          */
+    proto_s16 cur_tilt_ddeg;   /* 현재 고각 (엔코더, 부호)        */
+    proto_u8  flags;           /* bit0=homed, bit1=scanning       */
+    /* --- v6 진단 카운터 (누적, 부팅 이후) --- */
+    proto_u16 tx_fail;         /* UART 송신 실패                  */
+    proto_u16 rx_ovf;          /* 수신 링버퍼 오버플로.           */
+                               /*   0 이 아니면 메인루프가 오래 막혔다는 뜻 */
+    proto_u16 enc_retry;       /* 엔코더 판독 재시도              */
+    proto_u16 lidar_drop;      /* 라이다 큐 넘침으로 버린 샘플    */
+    proto_u16 reject_busy;     /* 진행 중이라 거절한 SCAN_START   */
 } PROTO_PACKED;
 
-/* CMD_ERROR payload (1B) */
+/* CMD_ERROR payload (2B, v6) */
 struct proto_err {
     proto_u8 code;          /* enum proto_err_code               */
+    proto_u8 axis;          /* enum proto_err_axis (v6 신설)     */
 } PROTO_PACKED;
 
 PROTO_PACKED_END
@@ -232,9 +296,10 @@ PROTO_PACKED_END
   #define TURRET_SCAN_START  _IOW(TURRET_IOC_MAGIC, 2, struct proto_scan_start)
   #define TURRET_SCAN_STOP   _IO (TURRET_IOC_MAGIC, 3)
   #define TURRET_DISARM      _IO (TURRET_IOC_MAGIC, 4)
-  /* 주의: v5 에서 turret_link_state 가 커져 _IOR 인코딩(크기 필드)이 바뀌었다.
-   *    구버전 유저스페이스가 신버전 드라이버를 때리면 -ENOTTY 로 즉시 실패한다
-   *    (조용한 구조체 오해석보다 안전). 드라이버·데몬은 같이 재빌드할 것. */
+  /* 주의: v5 와 v6 에서 turret_link_state 가 커져 _IOR 인코딩(크기 필드)이
+   *    두 번 바뀌었다. 구버전 유저스페이스가 신버전 드라이버를 때리면
+   *    -ENOTTY 로 즉시 실패한다(조용한 구조체 오해석보다 안전).
+   *    **드라이버·데몬은 반드시 같이 재빌드할 것.** */
   #define TURRET_GET_STATE   _IOR(TURRET_IOC_MAGIC, 5, struct turret_link_state)
   /* heartbeat PING 1회 송신(fire-and-forget). 주기·타임아웃 판정은 데몬 소유,
    * PONG 도착은 GET_STATE.pong_seq 증가로 감지. */
@@ -255,6 +320,23 @@ PROTO_PACKED_END
       proto_u16 home_tilt_encoder_raw;
       proto_s16 home_pan_ddeg;          /* 영점 적용 후 각도 (0.1도)    */
       proto_s16 home_tilt_ddeg;
+
+      /* v6: 최근 CMD_ERROR 의 축. last_err 와 짝이다.
+       * 이 필드가 생기기 전에는 어느 축인지 알 방법이 없어, 브링업 중에
+       * 다른 오류코드를 빌려 축을 표시했다(SCAN_HOME_AXIS_PROBE). */
+      proto_u8  last_err_axis;          /* enum proto_err_axis          */
+
+      /* v6: 최근 CMD_STATUS 의 진단 카운터. STM 이 1초 주기로 보낸다.
+       * 데몬이 MQTT state/daemon 의 diag 객체로 그대로 올린다. */
+      proto_u16 tx_fail;
+      proto_u16 rx_ovf;
+      proto_u16 enc_retry;
+      proto_u16 lidar_drop;
+      proto_u16 reject_busy;
+
+      /* v6: CMD_STATUS 를 한 번이라도 받았나. 0 이면 위 카운터는 의미 없다
+       * (구버전 펌웨어이거나 아직 첫 주기가 안 왔다). */
+      proto_u8  status_seen;
   };
 
   /* poll(): POLLIN = 스캔 점/통지 도착, POLLERR = link_dead */
@@ -301,5 +383,12 @@ typedef char proto_assert_homed_8B
     [(sizeof(struct proto_homed) == 8u) ? 1 : -1];
 typedef char proto_assert_point_fits_payload
     [(sizeof(struct proto_scan_point) <= PROTO_MAX_PAYLOAD) ? 1 : -1];
+/* v6 */
+typedef char proto_assert_err_2B
+    [(sizeof(struct proto_err) == 2u) ? 1 : -1];
+typedef char proto_assert_status_15B
+    [(sizeof(struct proto_status) == 15u) ? 1 : -1];
+typedef char proto_assert_status_fits_payload
+    [(sizeof(struct proto_status) <= PROTO_MAX_PAYLOAD) ? 1 : -1];
 
 #endif /* PROTOCOL_H */

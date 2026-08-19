@@ -1,7 +1,7 @@
 /*
  * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)  [protocol.h v5 스캐너]
  *
- * protocol.h(PROTO_VERSION=5) 프레임으로 STM32(USART1)와 UART 통신.
+ * protocol.h(PROTO_VERSION=6) 프레임으로 STM32(USART1)와 UART 통신.
  * 유저 데몬은 /dev/turret 에
  *   - ioctl 로 제어 명령(HOME / SCAN_START / SCAN_STOP / DISARM / PING)을 내리고,
  *   - read()/poll() 로 스캔 점 스트림(CMD_SCAN_DATA)을 배치 수신한다.
@@ -148,6 +148,21 @@ static void st_flags_update(struct turret_dev *dev, u8 set, u8 clear)
 	spin_unlock_irqrestore(&dev->st_lock, fl);
 }
 
+/* payload 길이가 기대와 다르면 알린다.
+ *
+ * 주의: 예전에는 `if (len == sizeof(...))` 가 아니면 **아무 말 없이 버렸다.**
+ *   그래서 펌웨어와 헤더 버전이 어긋나면 오류 통지 같은 것이 통째로 사라지는데,
+ *   증상은 "STM 이 아무 말도 안 한다" 로만 보여 링크 문제로 오해하게 된다.
+ *   protocol.h 4개 사본은 CI 의 drift-check 가 지키지만, **보드에 옛 펌웨어가
+ *   그대로 올라가 있는 경우**는 그것으로 못 잡는다 — 이 경고가 그걸 잡는다.
+ *   버전 바이트를 와이어에 싣는 것보다 넓다(버전을 안 올리고 구조체만 바꾼
+ *   경우까지 걸린다). */
+static void turret_bad_len(u8 cmd, u8 len, size_t want)
+{
+	pr_warn_ratelimited("turret: payload 길이 불일치 cmd=0x%02X len=%u (기대 %zu)"
+			    " — 펌웨어 버전 확인\n", cmd, len, want);
+}
+
 static void turret_notify(struct turret_dev *dev)
 {
 	WRITE_ONCE(dev->notify_pending, 1);
@@ -244,14 +259,30 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 					turret_notify(dev);
 					break;
 				case CMD_STATUS:
+					/* v6: STM 이 1초 주기로 실제 보낸다. v5 까지는 이
+					 * 프레임이 한 번도 오지 않아 STF_HOMED 가 갱신될 일이
+					 * 없었고, STM 을 리셋하면 캐시만 참으로 남았다.
+					 *
+					 * turret_notify 는 부르지 않는다 — 데몬은 100ms 틱마다
+					 * GET_STATE 로 어차피 읽으므로, 깨우면 poll() 이 초당
+					 * 한 번 헛되이 깨어날 뿐이다(예전에는 불렀는데, 그때는
+					 * 이 프레임이 실제로 오지 않아 드러나지 않았다). */
 					if (len == sizeof(struct proto_status)) {
-						struct proto_status s;
+						struct proto_status ps;
 
-						memcpy(&s, pl, sizeof(s));
-						dev->st.cur_pan_ddeg = s.cur_pan_ddeg;
-						dev->st.cur_tilt_ddeg   = s.cur_tilt_ddeg;
-						dev->st.flags          = s.flags;
-						turret_notify(dev);
+						memcpy(&ps, pl, sizeof(ps));
+						dev->st.cur_pan_ddeg  = ps.cur_pan_ddeg;
+						dev->st.cur_tilt_ddeg = ps.cur_tilt_ddeg;
+						dev->st.flags         = ps.flags;
+						dev->st.tx_fail       = ps.tx_fail;
+						dev->st.rx_ovf        = ps.rx_ovf;
+						dev->st.enc_retry     = ps.enc_retry;
+						dev->st.lidar_drop    = ps.lidar_drop;
+						dev->st.reject_busy   = ps.reject_busy;
+						dev->st.status_seen   = 1;
+					} else {
+						turret_bad_len(cmd, len,
+							       sizeof(struct proto_status));
 					}
 					break;
 				case CMD_SCAN_DATA:
@@ -281,10 +312,14 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 						struct proto_err e;
 
 						memcpy(&e, pl, sizeof(e));
-						dev->st.last_err = e.code;
-						pr_warn("turret: STM ERROR code=%u\n",
-							e.code);
+						dev->st.last_err      = e.code;
+						dev->st.last_err_axis = e.axis;
+						pr_warn("turret: STM ERROR code=%u axis=%u\n",
+							e.code, e.axis);
 						turret_notify(dev);
+					} else {
+						turret_bad_len(cmd, len,
+							       sizeof(struct proto_err));
 					}
 					break;
 				default:
