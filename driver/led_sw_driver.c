@@ -404,10 +404,14 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
    *         -EBUSY 가 아직도 나는지 다시 볼 것)
    *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
    *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
-  if (ret == -EBUSY) {
-    pr_warn("led_sw: gpio %d busy — 강제 회수 후 재시도 (%s)\n", pin, label);
+  if (ret == -EBUSY || ret == -EPROBE_DEFER) {
+    pr_warn("led_sw: gpio %d 첫 요청 실패(%d) — 회수 후 재시도 (%s)\n", pin, ret,
+            label);
     gpio_free(pin);
     ret = gpio_request_one(pin, flags, label);
+
+    /* 재시도도 defer 면 그건 진짜 "아직 준비 안 됐다" 이므로 그대로 올린다.
+     * 여기서 삼키면 커널이 나중에 probe 를 다시 불러줄 기회를 없앤다. */
   }
   return ret;
 }
@@ -504,31 +508,47 @@ static int led_sw_probe(struct platform_device *pdev) {
   g_led_sw->pin_sw_ems = gpio_ems;
 
   if (np) {
-    int gpio_tmp;
+    static const struct {
+      const char *prop;
+      size_t      off;
+    } dt_pins[] = {
+      { "gpios-led-green",     offsetof(struct led_sw_dev, pin_led_green)     },
+      { "gpios-led-yellow",    offsetof(struct led_sw_dev, pin_led_yellow)    },
+      { "gpios-led-red",       offsetof(struct led_sw_dev, pin_led_red)       },
+      { "gpios-sw-scan-start", offsetof(struct led_sw_dev, pin_sw_scan_start) },
+      { "gpios-sw-ems",        offsetof(struct led_sw_dev, pin_sw_ems)        },
+      { "gpios-buzzer",        offsetof(struct led_sw_dev, pin_buzzer)        },
+    };
+    size_t i;
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-green", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_green = gpio_tmp;
+    for (i = 0; i < ARRAY_SIZE(dt_pins); i++) {
+      const int gpio_tmp = of_get_named_gpio(np, dt_pins[i].prop, 0);
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-yellow", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_yellow = gpio_tmp;
+      if (gpio_tmp >= 0) {
+        *(int *)((char *)g_led_sw + dt_pins[i].off) = gpio_tmp;
+        continue;
+      }
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-red", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_red = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-sw-scan-start", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_sw_scan_start = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-sw-ems", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_sw_ems = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-buzzer", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_buzzer = gpio_tmp;
+      /* 주의: -EPROBE_DEFER 를 여기서 삼키면 안 된다. 예전 코드는
+       *   `if (gpio_tmp >= 0)` 하나로 모든 실패를 "DT 에 값이 없다" 로 보고
+       *   모듈 파라미터 기본값(17, 27, ...)으로 떨어졌는데, **그 번호로는
+       *   절대 성공할 수 없다.** 이 커널의 gpiochip base 가 512 라서
+       *   BCM 17 의 전역 번호는 529 이고, 전역 17 은 어느 칩에도 속하지
+       *   않아 gpio_request_one() 이 다시 -EPROBE_DEFER 를 낸다. 즉 한 번의
+       *   유예를 영구 실패로 바꿔놓고 그 사실을 로그로도 안 남겼다
+       *   (실측: 부팅 6.7초에 이미 이 경로를 타고 있었다).
+       *
+       *   DT 노드가 있으면 DT 가 유일한 진실이다. 유예는 그대로 올려보내
+       *   커널이 다시 부르게 하고, 그 외 오류는 실패로 끝낸다. */
+      if (gpio_tmp == -EPROBE_DEFER) {
+        pr_info("led_sw: %s — gpio 컨트롤러 준비 대기(재시도 예정)\n",
+                dt_pins[i].prop);
+      } else {
+        pr_err("led_sw: %s 해석 실패: %d\n", dt_pins[i].prop, gpio_tmp);
+      }
+      g_led_sw = NULL;   /* devm 이 회수하므로 포인터를 남기면 안 된다 */
+      return gpio_tmp;
+    }
   }
 
 	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%).
