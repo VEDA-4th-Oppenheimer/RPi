@@ -1148,7 +1148,7 @@ static void usage(const char *p)
         "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>]\n"
         "       [--lidar-offset <mm>] [--once]\n"
         "\n"
-        "  각도는 **기구각**, 단위 0.1도.  pan %d..%d,  tilt %d..%d,  step 10 = 1.0도\n"
+        "  각도는 **기구각**, 단위 0.1도.  pan %d..%d,  tilt %d..%d,  step 9 = 0.9도\n"
         "  --height 지면→라이다 높이(mm). 좌표엔 안 들어가고 메타데이터로만 실린다.\n"
         "  --lidar-offset  회전축 교점→라이다 발광면 거리(mm, 기본 %d).\n"
         "           라이다는 발광면 기준 거리를 주는데 좌표 원점은 축교점이라\n"
@@ -1157,13 +1157,19 @@ static void usage(const char *p)
         "  --once   스캔 1회 완료(EXPORT)되면 종료.\n"
         "\n"
         "  주의: 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
-        "    180도가 아니라 **179도까지**(1도 격자 기준) 돌려야 방위 360도가\n"
-        "    정확히 한 번씩 덮인다. 180 까지 돌리면 양끝이 같은 평면이라 중복.\n"
+        "    한 바퀴에서 **한 스텝 뺀 만큼**까지만 돌려야 방위 360도가 정확히\n"
+        "    한 번씩 덮인다. 180.0 까지 돌리면 양끝이 같은 평면이라 중복.\n"
         "\n"
-        "예) 방 전체 3D 스캔 (팬 0~179도, 틸트 -90~+90도, 1도 격자, 높이 2400mm):\n"
-        "  %s --scan 0 1790 %d %d 10 --height 2400 --once\n",
+        "예) 표준 스캔 (물리 버튼·웹·scan_batch 와 같은 값):\n"
+        "  %s --scan %d %d %d %d %d --height %d --once\n"
+        "    격자 0.9도는 샘플 간격에 맞춘 값이다 — 틸트 800pps(90도/s)에\n"
+        "    라이다 100Hz 면 0.9도마다 한 점이 떨어진다. 1.0도로 잡으면 빈 셀과\n"
+        "    중복이 동시에 생긴다. 팬 %d(179.1도)는 200줄 x 2방위로 정확히\n"
+        "    360도를 덮는 값이다(daemon_module.h 의 SCAN_DEF_* 참조).\n",
         p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, LIDAR_RANGE_OFFSET_MM,
-        p, TILT_MIN, TILT_MAX);
+        p, SCAN_DEF_PAN_START_DDEG, SCAN_DEF_PAN_END_DDEG,
+        SCAN_DEF_TILT_START_DDEG, SCAN_DEF_TILT_END_DDEG, SCAN_DEF_STEP_DDEG,
+        SCAN_DEF_HEIGHT_MM, SCAN_DEF_PAN_END_DDEG);
 }
 
 /* 인자 파싱. 스캔 요청이 있으면 req 를 채우고 true.

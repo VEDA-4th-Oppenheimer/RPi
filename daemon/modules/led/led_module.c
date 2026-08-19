@@ -145,17 +145,17 @@ static void led_on_event(struct shared_ctx *ctx)
 
         if (evt.sw_id == SW_SCAN_START) {
             (void)fprintf(stderr, "[led     ] SW_SCAN_START pressed -> CMD_SCAN_START trigger\n");
+            /* 표준 기본값(daemon_module.h). 여기에 숫자를 다시 적지 않는다 —
+             * 예전에 그렇게 해서 버튼만 1.0도 격자로 찍고 웹·scan_batch 는
+             * 0.9도로 찍는 상태가 됐다. 같은 킷의 산출물끼리 격자가 다르면
+             * 소비자가 조용히 틀린 계산을 한다. */
             if (ctx->req.valid == 0u) {
-                ctx->req.pan_start_ddeg   = 0;       /* 0.0 도 */
-                /* 주의: 1800 이 아니라 1790 이다. 팬 0~180 을 양끝 다 넣으면 첫 줄과
-                 *   마지막 줄이 **같은 수직 평면**이라 방위 0/180 만 두 번 찍힌다
-                 *   (실측 중복 180건). 1790 으로 끊으면 0건. 자세한 건
-                 *   scan_out_warn_seam() 주석 참조. */
-                ctx->req.pan_end_ddeg     = 1790;    /* 179.0 도 — 이음매 회피 */
-                ctx->req.tilt_start_ddeg  = -900;    /* -90.0 도 */
-                ctx->req.tilt_end_ddeg    = 900;     /* +90.0 도 */
-                ctx->req.step_ddeg        = 10;      /* 1.0 도 격자 */
-                ctx->req.sensor_height_mm = 0;
+                ctx->req.pan_start_ddeg   = SCAN_DEF_PAN_START_DDEG;
+                ctx->req.pan_end_ddeg     = SCAN_DEF_PAN_END_DDEG;
+                ctx->req.tilt_start_ddeg  = SCAN_DEF_TILT_START_DDEG;
+                ctx->req.tilt_end_ddeg    = SCAN_DEF_TILT_END_DDEG;
+                ctx->req.step_ddeg        = SCAN_DEF_STEP_DDEG;
+                ctx->req.sensor_height_mm = SCAN_DEF_HEIGHT_MM;
                 ctx->req.valid            = 1u;      /* 코어가 소비 */
             }
         } else if (evt.sw_id == SW_EMS) {

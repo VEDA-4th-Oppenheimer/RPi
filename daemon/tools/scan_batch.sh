@@ -37,7 +37,7 @@ OUTDIR=""
 KEEPGOING=0             # 1 = 실패해도 계속
 
 # 데몬에 넘길 스캔 인자. -- 뒤에 주면 통째로 교체된다.
-SCAN_ARGS=(--scan 0 1791 -900 900 9)
+SCAN_ARGS=(--scan 0 1791 -900 900 9 --height 1805)
 
 usage() {
     cat <<EOF
