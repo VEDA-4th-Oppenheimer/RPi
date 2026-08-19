@@ -1,17 +1,20 @@
 name: rpi Static Analysis
 
-# develop 도 포함한다.
-#   실제 작업은 develop 에서 이뤄지고 main 은 릴리스 지점이라, main 만 걸어두면
-#   게이트가 "이미 다 끝난 뒤" 에야 처음 돌아본다. 그 사이 develop 에 쌓인
-#   커밋은 아무도 검사하지 않은 상태로 남는다.
+# main 만 건다 (팀 결정).
+#   develop 은 작업 브랜치라 커밋이 잦고, 매 push 마다 러너를 돌리면 대기시간이
+#   길어진다. 게이트는 develop -> main PR 에서 걸리고, 그 전에는 각자
+#   `bash tools/run_static_analysis.sh` 로 로컬에서 확인한다.
+#
+#   주의: 그래서 develop 에 쌓이는 동안은 CI 가 봐주지 않는다. main 으로 올릴 때
+#     한꺼번에 터지지 않게, 커널·데몬을 고쳤으면 push 전에 로컬 검사를 돌릴 것.
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
     paths-ignore:
       - '**.md'
       - 'docs/**'
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
     paths-ignore:
       - '**.md'
       - 'docs/**'
