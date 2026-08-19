@@ -42,8 +42,6 @@
 │
 ├── docker/                  # 컨테이너 빌드 (macOS 에서 리눅스 전용 API 빌드용)
 │
-├── vision/                  # CLAHE/샤프닝 이미지 보정 ( 이영민)
-│
 ├── tools/                   # 정적분석 설정
 │   ├── cppcheck_suppressions.txt
 │   └── run_static_analysis.sh
@@ -328,7 +326,6 @@ bash tools/run_static_analysis.sh      # repo 루트에서
 | `daemon/modules/imu/` | 송영빈 |
 | `daemon/modules/led/` | 이현우 ( STUB) |
 | `broker/` | 이광진 |
-| `vision/` | 이영민 |
 | `tools/`, `.github/` | 강유근 (QA) |
 
 GitHub 핸들은 `CODEOWNERS` 참조. 다섯 명 모두 저장소 협업자라 PR 리뷰어가
