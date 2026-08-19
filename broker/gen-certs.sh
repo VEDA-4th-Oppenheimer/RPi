@@ -2,7 +2,7 @@
 # ============================================================================
 #  gen-certs.sh — MQTT mTLS 인증서 발급 (브로커 호스트 = RPi 에서 실행)
 # ----------------------------------------------------------------------------
-#  ★ 반드시 RPi 에서 실행한다. CA 개인키(ca.key)는 이 장비 밖으로 나가지 않는다.
+#  핵심: 반드시 RPi 에서 실행한다. CA 개인키(ca.key)는 이 장비 밖으로 나가지 않는다.
 #    클라이언트에게는 인증서와 그 클라이언트의 키만 내보낸다.
 #
 #  사용 ①  전체 발급 (최초 1회 — CA·브로커·데몬·기본 Qt 인증서를 한꺼번에)
@@ -14,7 +14,7 @@
 #      예)  sudo bash gen-certs.sh --client qt-console-youngbin /etc/adts/certs
 #
 #      발급 서비스(/enroll)가 사람마다 다른 CN 으로 인증서를 내줄 때 쓴다.
-#      ★ 발급 후 반드시 /etc/mosquitto/conf.d/adts.acl 에 그 CN 블록을 추가하고
+#      핵심: 발급 후 반드시 /etc/mosquitto/conf.d/adts.acl 에 그 CN 블록을 추가하고
 #        브로커를 reload 해야 한다. mosquitto ACL 은 `user <CN>` **정확 매칭**이라
 #        와일드카드가 없어서, 빠뜨리면 인증서는 정상인데 구독·발행이 조용히 막힌다.
 #        (broker/mosquitto.acl.example 하단 참고)
@@ -37,7 +37,7 @@
 #  만들어지는 것 (②):
 #      <CN>.crt / <CN>.key / <CN>-trad.key
 #
-#  ⚠️ Qt(QSslKey)는 OpenSSL 3.x 기본인 PKCS#8 키를 QSsl::Rsa 로 읽으면
+#  주의: Qt(QSslKey)는 OpenSSL 3.x 기본인 PKCS#8 키를 QSsl::Rsa 로 읽으면
 #    null 을 반환하고 **조용히** 실패한다. 그래서 변환본을 같이 만든다.
 # ============================================================================
 set -euo pipefail
@@ -50,6 +50,7 @@ usage() {
 사용:
   bash gen-certs.sh <RPi_IP> [출력디렉터리]        # 전체 발급 (최초 1회)
   bash gen-certs.sh --client <CN> [출력디렉터리]   # 클라이언트 인증서 1개 추가
+  bash gen-certs.sh --server <CN> [출력디렉터리]   # 서버 인증서 (카메라 등)
 
   bash gen-certs.sh --new-token <라벨>             # 1회용 발급 토큰 생성
   bash gen-certs.sh --list-tokens                  # 미사용 토큰 목록
@@ -82,7 +83,7 @@ if [ "${1:-}" = "--new-token" ]; then
     # 같은 라벨의 미사용 토큰이 이미 있으면 알려준다. 여러 개 두는 것 자체는
     # 문제가 없지만(먼저 쓴 것만 유효) 관리자가 헷갈리기 쉽다.
     if grep -qE "^[^#[:space:]]+[[:space:]]+${LABEL}$" "$TOKEN_FILE" 2>/dev/null; then
-        echo "⚠️  '${LABEL}' 앞으로 아직 쓰지 않은 토큰이 이미 있습니다." >&2
+        echo "주의: '${LABEL}' 앞으로 아직 쓰지 않은 토큰이 이미 있습니다." >&2
         echo "    회수하려면: bash gen-certs.sh --revoke ${LABEL}" >&2
     fi
 
@@ -159,6 +160,76 @@ if [ "${1:-}" = "--revoke" ]; then
     echo "※ 이미 발급받아 간 인증서는 그대로 유효합니다 — 그건 ACL 에서 빼야 합니다:"
     echo "   /etc/mosquitto/conf.d/adts.acl 의 'user qt-console-${LABEL}' 블록 삭제 후"
     echo "   sudo systemctl reload mosquitto"
+    exit 0
+fi
+
+# ── 모드 ④ : 서버 인증서 발급 (카메라 등, 접속을 **받는** 쪽) ────────────────
+#
+#  왜 --client 로는 안 되나:
+#    --client 는 extendedKeyUsage=clientAuth 만 넣는다. 그 인증서를 서버로 세우면
+#    접속하는 쪽이 용도 불일치로 거부한다. 서버는 serverAuth + SAN 이 필요하다.
+#
+#  핵심: SAN 에 IP 를 넣지 않는다. 카메라도 RPi 도 DHCP 라 주소가 계속 바뀌는데,
+#    IP SAN 을 박으면 주소가 바뀔 때마다 인증서를 다시 발급해야 한다. 대신
+#    **고정된 이름**을 넣고 접속하는 쪽이 그 이름으로 검증한다(SSL_set1_host).
+#    DNS 에 실제로 등록될 필요는 없다 — 신원 라벨로만 쓴다.
+#
+#    즉 주소는 설정 파일이 알려주고, 신원은 인증서가 증명한다. 둘을 분리했기
+#    때문에 IP 가 매일 바뀌어도 인증서는 그대로다.
+#
+#  주소를 고정할 수 있게 되면(전용 링크 등) ADTS_EXTRA_SAN 으로 추가한다:
+#      ADTS_EXTRA_SAN="IP:192.168.50.10" bash gen-certs.sh --server adts-camera
+if [ "${1:-}" = "--server" ]; then
+    CN="${2:-}"
+    OUT="${3:-/etc/adts/certs}"
+    [ -n "$CN" ] || usage
+    check_label "$CN"
+
+    cd "$OUT" 2>/dev/null || { echo "출력 디렉터리가 없습니다: $OUT" >&2; exit 1; }
+    [ -f ca.crt ] && [ -f ca.key ] || {
+        echo "$OUT 에 ca.crt/ca.key 가 없습니다. 먼저 전체 발급을 실행하십시오." >&2; exit 1; }
+    [ -e "$CN.crt" ] && { echo "이미 존재합니다: $OUT/$CN.crt (지우고 다시 실행)" >&2; exit 1; }
+
+    SAN="DNS:$CN"
+    [ -n "${ADTS_EXTRA_SAN:-}" ] && SAN="$SAN,$ADTS_EXTRA_SAN"
+
+    TMP_CNF="$(mktemp)"
+    trap 'rm -f "$TMP_CNF"' EXIT
+    cat > "$TMP_CNF" <<EOF
+[req]
+distinguished_name = dn
+[dn]
+[v3_server]
+basicConstraints = CA:FALSE
+keyUsage         = digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName   = $SAN
+EOF
+
+    openssl req -newkey rsa:2048 -nodes -keyout "$CN.key" -out "$CN.csr" \
+        -subj "/CN=$CN" -config "$TMP_CNF" 2>/dev/null
+    openssl x509 -req -in "$CN.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
+        -days "$DAYS" -out "$CN.crt" -extfile "$TMP_CNF" -extensions v3_server 2>/dev/null
+    rm -f "$CN.csr" ca.srl
+
+    chmod 600 "$CN.key"
+    chmod 644 "$CN.crt"
+
+    cat <<EOF
+발급 완료 (서버 인증서, CN=$CN)
+  $OUT/$CN.crt      SAN = $SAN
+  $OUT/$CN.key
+
+카메라(수신측)에 넘길 것 — 3개:
+  $CN.crt   $CN.key   ca.crt
+
+  ca.crt 는 카메라가 **데몬의 클라이언트 인증서를 검증**하는 데 쓴다(mTLS).
+  주의: ca.key 는 절대 넘기지 말 것.
+
+데몬 쪽은 발급이 필요 없다 — daemon.crt/daemon.key 를 이미 갖고 있다.
+데몬이 검증할 이름은 위 SAN 의 DNS 값이다:
+  /etc/adts/camera.conf 의  name = $CN
+EOF
     exit 0
 fi
 
@@ -308,8 +379,8 @@ cat <<EOF
     mkdir -p ~/adts-certs
     scp pi@${HOST_IP}:$(pwd)/{ca.crt,qt-console.crt,qt-console-trad.key} ~/adts-certs/
 
-⚠️ ca.key 는 절대 내보내지 말 것. 이 장비에만 있어야 한다.
-⚠️ 유효기간 ${DAYS}일. RPi 는 RTC 가 없어 인터넷 없이 부팅하면 시계가
+주의: ca.key 는 절대 내보내지 말 것. 이 장비에만 있어야 한다.
+주의: 유효기간 ${DAYS}일. RPi 는 RTC 가 없어 인터넷 없이 부팅하면 시계가
    틀어져 "not yet valid" 로 거부될 수 있다 (fake-hwclock 확인).
 ──────────────────────────────────────────────────────────────
 EOF

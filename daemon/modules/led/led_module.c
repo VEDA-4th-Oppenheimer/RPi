@@ -80,7 +80,7 @@ static void update_leds_buzzer(const struct shared_ctx *ctx)
             ctrl.buzzer = 0u;
             s_buz_seq = BUZ_NONE;
         }
-        
+
         if (s_buz_seq != BUZ_NONE) {
             s_buz_ticks++;
         }
@@ -145,22 +145,27 @@ static void led_on_event(struct shared_ctx *ctx)
 
         if (evt.sw_id == SW_SCAN_START) {
             (void)fprintf(stderr, "[led     ] SW_SCAN_START pressed -> CMD_SCAN_START trigger\n");
+            /* 표준 기본값(daemon_module.h). 여기에 숫자를 다시 적지 않는다 —
+             * 예전에 그렇게 해서 버튼만 1.0도 격자로 찍고 웹·scan_batch 는
+             * 0.9도로 찍는 상태가 됐다. 같은 킷의 산출물끼리 격자가 다르면
+             * 소비자가 조용히 틀린 계산을 한다. */
             if (ctx->req.valid == 0u) {
-                ctx->req.pan_start_ddeg   = 0;       /* 0.0 도 */
-                /* ⚠️ 1800 이 아니라 1790 이다. 팬 0~180 을 양끝 다 넣으면 첫 줄과
-                 *   마지막 줄이 **같은 수직 평면**이라 방위 0/180 만 두 번 찍힌다
-                 *   (실측 중복 180건). 1790 으로 끊으면 0건. 자세한 건
-                 *   scan_out_warn_seam() 주석 참조. */
-                ctx->req.pan_end_ddeg     = 1790;    /* 179.0 도 — 이음매 회피 */
-                ctx->req.tilt_start_ddeg  = -900;    /* -90.0 도 */
-                ctx->req.tilt_end_ddeg    = 900;     /* +90.0 도 */
-                ctx->req.step_ddeg        = 10;      /* 1.0 도 격자 */
-                ctx->req.sensor_height_mm = 0;
+                ctx->req.pan_start_ddeg   = SCAN_DEF_PAN_START_DDEG;
+                ctx->req.pan_end_ddeg     = SCAN_DEF_PAN_END_DDEG;
+                ctx->req.tilt_start_ddeg  = SCAN_DEF_TILT_START_DDEG;
+                ctx->req.tilt_end_ddeg    = SCAN_DEF_TILT_END_DDEG;
+                ctx->req.step_ddeg        = SCAN_DEF_STEP_DDEG;
+                ctx->req.sensor_height_mm = SCAN_DEF_HEIGHT_MM;
                 ctx->req.valid            = 1u;      /* 코어가 소비 */
             }
         } else if (evt.sw_id == SW_EMS) {
-            (void)fprintf(stderr, "[led     ] SW_EMS pressed -> CMD_DISARM trigger\n");
-            ctx->req_disarm = 1u;
+            if (ctx->state == ST_DISARM) {
+                (void)fprintf(stderr, "[led     ] SW_EMS pressed in DISARM -> CMD_REARM trigger\n");
+                ctx->req_rearm = 1u;
+            } else {
+                (void)fprintf(stderr, "[led     ] SW_EMS pressed -> CMD_DISARM trigger\n");
+                ctx->req_disarm = 1u;
+            }
         }
     }
 }
@@ -186,9 +191,13 @@ static void led_on_state(struct shared_ctx *ctx,
 {
     (void)old_st;
 
-    /* SCAN_DONE (ST_EXPORT 진입) 감지 */
+    /* SCAN_DONE (ST_EXPORT 진입) 감지 -> 0.5초 알림음 */
     if (new_st == ST_EXPORT) {
         s_buz_seq = BUZ_SCAN_DONE;
+        s_buz_ticks = 0;
+    } else if (new_st == ST_DISARM) {
+        /* 비상정지 (ST_DISARM 진입) 감지 -> 0.2초 2회 경고음 */
+        s_buz_seq = BUZ_ERROR;
         s_buz_ticks = 0;
     }
 

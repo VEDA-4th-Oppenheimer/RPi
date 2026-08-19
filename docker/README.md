@@ -4,7 +4,7 @@ VM/Gateway 없이 맥(M4)에서 RPi **데몬(epoll)** + **커널 드라이버(.k
 소스는 레포를 런타임 마운트(`-v`)하므로 이 폴더는 레포 밖에 있어도 됨.
 원리: [CrossCompile 문서](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/14450710/CrossCompile) / [Notion Docker Build](https://app.notion.com/p/3a7fdb06b70f8031b0f4e9c8ca6a6e54)
 
-> ⚠️ 커널 값 `SUBLEVEL=75 / +rpt-rpi / -v8` 은 RPi `6.12.75+rpt-rpi-v8` 기준.
+> 주의: 커널 값 `SUBLEVEL=75 / +rpt-rpi / -v8` 은 RPi `6.12.75+rpt-rpi-v8` 기준.
 > Pi 커널 바뀌면 `uname -r` 보고 Dockerfile ARG + 아래 KREL 갱신.
 
 ## 1. 이미지 빌드 (1회)
@@ -22,7 +22,7 @@ scp $PI:/usr/src/linux-headers-$KREL/.config        ~/pi-kernel/.config
 scp $PI:/usr/src/linux-headers-$KREL/Module.symvers ~/pi-kernel/Module.symvers
 ssh $PI 'sudo apt-mark hold linux-image-rpi-v8 linux-headers-rpi-v8'   # 자동 업그레이드 차단
 ```
-🚫 `linux-headers` 디렉토리 통째/`linux-kbuild` 복사 금지 (aarch64 바이너리). 이 2개만.
+ `linux-headers` 디렉토리 통째/`linux-kbuild` 복사 금지 (aarch64 바이너리). 이 2개만.
 
 ## 3. 컨테이너 실행 + 커널 prepare (--rm 없이 유지)
 ```bash
@@ -39,7 +39,7 @@ export ARCH=arm64                 # M4 네이티브 → CROSS_COMPILE 생략
 make olddefconfig
 make LOCALVERSION= modules_prepare
 cp /pi-kernel/Module.symvers .
-cat include/config/kernel.release  # ★ 6.12.75+rpt-rpi-v8 (Pi uname -r) 와 100% 일치 확인
+cat include/config/kernel.release  # 핵심: 6.12.75+rpt-rpi-v8 (Pi uname -r) 와 100% 일치 확인
 ```
 다음 세션엔 `docker start -ai adts` 로 재진입 (prepare 유지됨).
 

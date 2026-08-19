@@ -66,7 +66,7 @@ rpi:
 	$(MAKE) ARCH=$(RPI_ARCH) CROSS_COMPILE=$(RPI_CROSS) KDIR=$(RPI_KDIR) all
 
 modules:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 turret_test: turret_test.c $(PROTO_H)
 	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $<
@@ -92,5 +92,5 @@ overlays/%.dtbo: overlays/%.dts
 	dtc -@ -I dts -O dtb -o $@ $<
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 	rm -f turret_test imu_test led_sw_test overlays/*.dtbo

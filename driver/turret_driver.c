@@ -1,7 +1,7 @@
 /*
  * turret_driver.c — RPi serdev 커널 모듈 (/dev/turret)  [protocol.h v5 스캐너]
  *
- * protocol.h(PROTO_VERSION=5) 프레임으로 STM32(USART1)와 UART 통신.
+ * protocol.h(PROTO_VERSION=6) 프레임으로 STM32(USART1)와 UART 통신.
  * 유저 데몬은 /dev/turret 에
  *   - ioctl 로 제어 명령(HOME / SCAN_START / SCAN_STOP / DISARM / PING)을 내리고,
  *   - read()/poll() 로 스캔 점 스트림(CMD_SCAN_DATA)을 배치 수신한다.
@@ -41,6 +41,7 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/kfifo.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
@@ -64,6 +65,16 @@ struct turret_dev {
 	struct serdev_device *serdev;
 	struct miscdevice     misc;
 	struct mutex          lock;        /* ioctl 직렬화(TX 프레임 원자성) */
+	/* st 전용 스핀락.
+	 *
+	 * 주의: dev->lock(뮤텍스)으로는 못 막는다. RX 콜백은 tty flip 워크에서
+	 *   불리는데 거기서 뮤텍스를 잡으면 수신이 멈춰 프레임을 놓친다. 그래서
+	 *   RX 는 락 없이 st 를 갱신했고, ioctl 은 그걸 통째로 copy_to_user 했다
+	 *   — 갱신 도중에 읽으면 **서로 다른 프레임의 값이 섞인 스냅샷**이
+	 *   나간다(예: 새 flags 와 옛 cur_pan_ddeg). 임계구역이 몇 바이트
+	 *   복사뿐이라 스핀락이 맞다. copy_to_user 는 잠들 수 있으므로 반드시
+	 *   락 밖에서 한다. */
+	spinlock_t            st_lock;
 	wait_queue_head_t     rx_wq;       /* read()/poll() 대기            */
 
 	/* 스캔 점 스트림 (생산자=RX 콜백, 소비자=read(), SPSC) */
@@ -108,7 +119,7 @@ static int turret_send_frame(struct turret_dev *dev, u8 cmd,
 	frame[total + 1] = (crc >> 8) & 0xFF;
 	total += PROTO_CRC_LEN;
 
-	/* ⚠️ KERN_INFO 였는데 KERN_DEBUG 로 낮춘다. 데몬이 100ms 마다 PING 을
+	/* 주의: KERN_INFO 였는데 KERN_DEBUG 로 낮춘다. 데몬이 100ms 마다 PING 을
 	 * 보내므로 초당 10줄이 무조건 쌓이고, 커널 링버퍼가 그걸로 가득 차서
 	 * 정작 봐야 할 메시지(다른 드라이버의 probe 실패 등)가 밀려난다.
 	 * 실제로 IMU 고장 로그를 이 홍수 때문에 못 봤다.
@@ -125,6 +136,33 @@ static int turret_send_frame(struct turret_dev *dev, u8 cmd,
 }
 
 /* 통지(HOMED/DONE/STATUS/ERROR) 도착 → 데몬이 GET_STATE 로 확인하도록 깨움 */
+/* st.flags 를 st_lock 아래에서 갱신한다. ioctl 이 dev->lock 을 쥐고 있어도
+ * RX 콜백은 그 뮤텍스를 안 잡으므로, flags 읽기-수정-쓰기가 RX 의 갱신과
+ * 겹칠 수 있다. 둘 다 같은 스핀락을 거쳐야 의미가 있다. */
+static void st_flags_update(struct turret_dev *dev, u8 set, u8 clear)
+{
+	unsigned long fl;
+
+	spin_lock_irqsave(&dev->st_lock, fl);
+	dev->st.flags = (u8)((dev->st.flags | set) & (u8)~clear);
+	spin_unlock_irqrestore(&dev->st_lock, fl);
+}
+
+/* payload 길이가 기대와 다르면 알린다.
+ *
+ * 주의: 예전에는 `if (len == sizeof(...))` 가 아니면 **아무 말 없이 버렸다.**
+ *   그래서 펌웨어와 헤더 버전이 어긋나면 오류 통지 같은 것이 통째로 사라지는데,
+ *   증상은 "STM 이 아무 말도 안 한다" 로만 보여 링크 문제로 오해하게 된다.
+ *   protocol.h 4개 사본은 CI 의 drift-check 가 지키지만, **보드에 옛 펌웨어가
+ *   그대로 올라가 있는 경우**는 그것으로 못 잡는다 — 이 경고가 그걸 잡는다.
+ *   버전 바이트를 와이어에 싣는 것보다 넓다(버전을 안 올리고 구조체만 바꾼
+ *   경우까지 걸린다). */
+static void turret_bad_len(u8 cmd, u8 len, size_t want)
+{
+	pr_warn_ratelimited("turret: payload 길이 불일치 cmd=0x%02X len=%u (기대 %zu)"
+			    " — 펌웨어 버전 확인\n", cmd, len, want);
+}
+
 static void turret_notify(struct turret_dev *dev)
 {
 	WRITE_ONCE(dev->notify_pending, 1);
@@ -185,7 +223,12 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 			if (rx_crc == calc) {
 				u8 cmd = dev->rx_buf[1];
 				const u8 *pl = &dev->rx_buf[PROTO_HEADER_LEN];
+				unsigned long fl;
 
+				/* st 갱신 전체를 한 임계구역으로 묶는다. 프레임 하나가
+				 * 여러 필드를 함께 바꾸므로(예: CMD_STATUS 는 각도와
+				 * flags 를 같이), 필드별로 잠그면 스냅샷이 여전히 섞인다. */
+				spin_lock_irqsave(&dev->st_lock, fl);
 				switch (cmd) {
 				case CMD_PONG:
 					/* heartbeat: 판정은 데몬. 여기선 카운터만. */
@@ -216,14 +259,30 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 					turret_notify(dev);
 					break;
 				case CMD_STATUS:
+					/* v6: STM 이 1초 주기로 실제 보낸다. v5 까지는 이
+					 * 프레임이 한 번도 오지 않아 STF_HOMED 가 갱신될 일이
+					 * 없었고, STM 을 리셋하면 캐시만 참으로 남았다.
+					 *
+					 * turret_notify 는 부르지 않는다 — 데몬은 100ms 틱마다
+					 * GET_STATE 로 어차피 읽으므로, 깨우면 poll() 이 초당
+					 * 한 번 헛되이 깨어날 뿐이다(예전에는 불렀는데, 그때는
+					 * 이 프레임이 실제로 오지 않아 드러나지 않았다). */
 					if (len == sizeof(struct proto_status)) {
-						struct proto_status s;
+						struct proto_status ps;
 
-						memcpy(&s, pl, sizeof(s));
-						dev->st.cur_pan_ddeg = s.cur_pan_ddeg;
-						dev->st.cur_tilt_ddeg   = s.cur_tilt_ddeg;
-						dev->st.flags          = s.flags;
-						turret_notify(dev);
+						memcpy(&ps, pl, sizeof(ps));
+						dev->st.cur_pan_ddeg  = ps.cur_pan_ddeg;
+						dev->st.cur_tilt_ddeg = ps.cur_tilt_ddeg;
+						dev->st.flags         = ps.flags;
+						dev->st.tx_fail       = ps.tx_fail;
+						dev->st.rx_ovf        = ps.rx_ovf;
+						dev->st.enc_retry     = ps.enc_retry;
+						dev->st.lidar_drop    = ps.lidar_drop;
+						dev->st.reject_busy   = ps.reject_busy;
+						dev->st.status_seen   = 1;
+					} else {
+						turret_bad_len(cmd, len,
+							       sizeof(struct proto_status));
 					}
 					break;
 				case CMD_SCAN_DATA:
@@ -253,16 +312,21 @@ static size_t turret_rx_callback(struct serdev_device *serdev,
 						struct proto_err e;
 
 						memcpy(&e, pl, sizeof(e));
-						dev->st.last_err = e.code;
-						pr_warn("turret: STM ERROR code=%u\n",
-							e.code);
+						dev->st.last_err      = e.code;
+						dev->st.last_err_axis = e.axis;
+						pr_warn("turret: STM ERROR code=%u axis=%u\n",
+							e.code, e.axis);
 						turret_notify(dev);
+					} else {
+						turret_bad_len(cmd, len,
+							       sizeof(struct proto_err));
 					}
 					break;
 				default:
 					pr_info("turret: unknown cmd 0x%02X\n", cmd);
 					break;
 				}
+				spin_unlock_irqrestore(&dev->st_lock, fl);
 			} else {
 				pr_warn("turret: CRC FAIL rx=0x%04X calc=0x%04X\n",
 					rx_crc, calc);
@@ -362,7 +426,7 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		 *
 		 * 내려두면 플래그가 "직전 HOME 이후 완료됨" 을 뜻하게 되어,
 		 * 유저가 이 플래그를 기다리는 것이 실제로 의미를 갖는다. */
-		dev->st.flags &= ~STF_HOMED;
+		st_flags_update(dev, 0, STF_HOMED);
 		ret = turret_send_frame(dev, CMD_HOME, NULL, 0);
 		mutex_unlock(&dev->lock);
 		return ret;
@@ -403,16 +467,22 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		 * 각도로 격자에 배치하므로 새 스캔 범위 밖이면 걸러진다. */
 		kfifo_reset_out(&dev->scan_fifo);
 		dev->last_point_count = 0;
-		dev->st.last_err      = ERR_NONE;
+		{
+			unsigned long fl;
+
+			spin_lock_irqsave(&dev->st_lock, fl);
+			dev->st.last_err = ERR_NONE;
+			spin_unlock_irqrestore(&dev->st_lock, fl);
+		}
 
 		/* STF_SCANNING 을 여기서 세운다. STM 의 CMD_STATUS 를 기다리면
 		 * 그 사이 데몬이 "스캔 안 도는데?" 로 오판한다. 전송 실패 시
 		 * 아래에서 되돌린다. */
-		dev->st.flags |= STF_SCANNING;
+		st_flags_update(dev, STF_SCANNING, 0);
 
 		ret = turret_send_frame(dev, CMD_SCAN_START, &ss, sizeof(ss));
 		if (ret < 0)
-			dev->st.flags &= ~STF_SCANNING;   /* 롤백 */
+			st_flags_update(dev, 0, STF_SCANNING);   /* 롤백 */
 
 		mutex_unlock(&dev->lock);
 		return ret;
@@ -430,11 +500,21 @@ static long turret_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		mutex_unlock(&dev->lock);
 		return ret;
 
-	case TURRET_GET_STATE:
+	case TURRET_GET_STATE: {
+		struct turret_link_state snap;
+		unsigned long fl;
+
 		WRITE_ONCE(dev->notify_pending, 0);   /* 통지 소비 */
-		if (copy_to_user(uarg, &dev->st, sizeof(dev->st)))
+		/* 락 안에서는 복사만. copy_to_user 는 페이지 폴트로 잠들 수 있어
+		 * 스핀락 아래에서 부르면 안 된다. */
+		spin_lock_irqsave(&dev->st_lock, fl);
+		snap = dev->st;
+		spin_unlock_irqrestore(&dev->st_lock, fl);
+
+		if (copy_to_user(uarg, &snap, sizeof(snap)))
 			return -EFAULT;
 		return 0;
+	}
 
 	case TURRET_PING:
 		/* 데몬이 100ms tick 마다 호출. 응답 PONG 은 pong_seq 로 감지 */
@@ -469,6 +549,7 @@ static int turret_probe(struct serdev_device *serdev)
 
 	dev->serdev = serdev;
 	mutex_init(&dev->lock);
+	spin_lock_init(&dev->st_lock);
 	init_waitqueue_head(&dev->rx_wq);
 	INIT_KFIFO(dev->scan_fifo);
 

@@ -34,18 +34,21 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/modules/mqtt
     ${CMAKE_SOURCE_DIR}/modules/imu
     ${CMAKE_SOURCE_DIR}/modules/led
+    ${CMAKE_SOURCE_DIR}/modules/camera
 )
 
 # 실행 파일 및 소스
 #   core/     = 이현우 (epoll 루프 + FSM + shared_ctx
 #                       + (pan,tilt,d)->(x,y,z) 변환 + 포인트클라우드 .pcd)
-#   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우  — 현재 STUB
+#   modules/  = mqtt:이현우+이광진 / imu:송영빈 / led:이현우
+#               camera:이현우(송신) + 이영민(수신 CV5 앱)
 add_executable(adts_daemon
     core/main.c
     core/scan_output.c
     modules/mqtt/mqtt_module.c
     modules/imu/imu_module.c
     modules/led/led_module.c
+    modules/camera/camera_module.c
 )
 
 # 좌표 변환에 libm (cos/sin) 필요
@@ -54,10 +57,25 @@ add_executable(adts_daemon
 #  libcjson     : 명령/상태 페이로드 파싱·생성
 #  둘 다 Debian/Ubuntu 패키지: apt install libmosquitto-dev libcjson-dev
 #
-#  ⚠️ 두 라이브러리는 **선택**이다. 없으면 MQTT 를 컴파일아웃하고 계속 빌드한다.
+#  주의: 두 라이브러리는 **선택**이다. 없으면 MQTT 를 컴파일아웃하고 계속 빌드한다.
 #    맥 크로스 툴체인 sysroot 에는 aarch64 용 패키지가 없어서, REQUIRED 로 두면
 #    CLion 이 configure 단계에서 실패해 인덱싱조차 안 된다. 실제 배포 바이너리는
 #    Docker(대상과 같은 glibc) 에서 굽고, 크로스 경로는 편집·인덱싱용이다.
+#  OpenSSL      : 카메라 업로드 mTLS (camera_module)
+#  주의: 없으면 업로드를 **비활성**으로 컴파일한다. 평문으로 되돌리지 않는다 —
+#    보안 기능이 조용히 꺼진 채 도는 것이 실패보다 나쁘다. 스캔 파일은 로컬에
+#    남으므로 잃는 것은 없다.
+find_package(OpenSSL)
+if(OpenSSL_FOUND)
+    target_link_libraries(adts_daemon OpenSSL::SSL OpenSSL::Crypto)
+    message(STATUS "카메라 업로드: mTLS 활성 (OpenSSL ${OPENSSL_VERSION})")
+else()
+    target_compile_definitions(adts_daemon PRIVATE ADTS_NO_TLS=1)
+    message(WARNING
+        "OpenSSL 을 찾지 못해 카메라 업로드를 비활성으로 빌드합니다.\n"
+        "  배포용은 Docker 에서 빌드하십시오:  apt install libssl-dev")
+endif()
+
 find_library(MOSQUITTO_LIB mosquitto)
 find_library(CJSON_LIB     cjson)
 

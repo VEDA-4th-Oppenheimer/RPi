@@ -1,5 +1,12 @@
 name: rpi Static Analysis
 
+# main 만 건다 (팀 결정).
+#   develop 은 작업 브랜치라 커밋이 잦고, 매 push 마다 러너를 돌리면 대기시간이
+#   길어진다. 게이트는 develop -> main PR 에서 걸리고, 그 전에는 각자
+#   `bash tools/run_static_analysis.sh` 로 로컬에서 확인한다.
+#
+#   주의: 그래서 develop 에 쌓이는 동안은 CI 가 봐주지 않는다. main 으로 올릴 때
+#     한꺼번에 터지지 않게, 커널·데몬을 고쳤으면 push 전에 로컬 검사를 돌릴 것.
 on:
   push:
     branches: [ main ]
@@ -31,6 +38,10 @@ jobs:
         run: bash tools/run_static_analysis.sh driver
 
       # 커널 헤더가 필요한 모듈 대신, 유저 공간 앱만 컴파일하여 GCC Warning/Error 검증
+      #
+      # 즉 .ko 는 여기서 안 만들어진다. 러너에 실행 커널의 헤더가 없어서인데,
+      # 그래서 모듈 컴파일 오류는 CI 가 못 잡는다 — 실기(RPi)에서 make 를
+      # 돌려봐야 안다. 커널 코드를 고쳤으면 그 확인을 건너뛰지 말 것.
       - name: Check GCC Warnings (Compile check)
         run: |
           cd driver
@@ -44,10 +55,14 @@ jobs:
         uses: actions/checkout@v5
 
       # cmake/gcc 는 러너에 기본 탑재. cppcheck 만 설치.
+      #
+      # libssl-dev 를 넣는 이유: 없으면 CMake 가 카메라 업로드를 ADTS_NO_TLS 로
+      # 비활성 컴파일한다. 그러면 mTLS 경로가 통째로 검사에서 빠지는데, 정작
+      # 배포 바이너리는 그 경로로 돌기 때문에 게이트가 헛돈다.
       - name: Install cppcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck
+          sudo apt-get install -y cppcheck libssl-dev
 
       # 1차 게이트: 실제 컴파일 (-Wall -Wextra -Werror). compile_commands.json 도 여기서 생성.
       - name: Configure CMake
@@ -59,3 +74,40 @@ jobs:
       # 2차 게이트: cppcheck (compile_commands.json 기반)
       - name: Run cppcheck (daemon)
         run: bash tools/run_static_analysis.sh daemon
+
+      # 3차: OpenSSL 이 없는 구성으로도 빌드해 본다.
+      #
+      # CMakeLists 는 "OpenSSL 이 없으면 업로드를 비활성으로 컴파일한다" 고
+      # 약속하는데, 그 분기는 평소 아무도 안 밟아서 조용히 썩는다. 실제로
+      # camera_module 의 TLS 전용 함수 두 개가 고아가 되어 -Werror 로 깨져
+      # 있었고, 하필 맥/CLion 크로스 설정이 타는 경로였다. 약속한 구성은
+      # 그 구성으로도 빌드해봐야 지켜진다.
+      - name: Build without OpenSSL (ADTS_NO_TLS gate)
+        run: |
+          cmake -S daemon -B daemon/build-notls \
+                -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+          cmake --build daemon/build-notls
+
+  # ── 발급 서비스 정적분석 (CMake -Werror 빌드 게이트 + cppcheck) ──
+  #
+  # 데몬과 같은 방식이지만 별도 CMake 프로젝트다. 오래 빠져 있었는데,
+  # CA 개인키를 읽고 root 로 도는 코드라 검사에서 빠져 있을 자리가 아니다.
+  broker-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v5
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck libssl-dev libcjson-dev
+
+      - name: Configure CMake
+        run: cmake -S broker -B broker/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build (-Wall -Wextra -Werror gate)
+        run: cmake --build broker/build
+
+      - name: Run cppcheck (broker)
+        run: bash tools/run_static_analysis.sh broker

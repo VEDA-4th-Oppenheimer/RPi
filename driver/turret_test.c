@@ -135,7 +135,7 @@ static int do_stream(int fd, int timeout_ms)
 				if (s.last_err)
 					printf("  [STM ERROR] code=%u\n", s.last_err);
 				if (saw_scanning && !(s.flags & STF_SCANNING)) {
-					printf("✓ SCAN_DONE 감지 (총 %lu점)\n",
+					printf(" SCAN_DONE 감지 (총 %lu점)\n",
 					       total);
 					return 0;
 				}
@@ -162,7 +162,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "HOME failed: %s\n", strerror(errno));
 			rc = 1;
 		} else {
-			printf("✓ CMD_HOME 전송\n");
+			printf(" CMD_HOME 전송\n");
 		}
 	}
 	else if (!strcmp(argv[1], "scan")) {
@@ -187,7 +187,7 @@ int main(int argc, char *argv[])
 				strerror(errno));
 			rc = 1;
 		} else {
-			printf("✓ CMD_SCAN_START θ[%d..%d] φ[%d..%d] step=%u\n",
+			printf(" CMD_SCAN_START θ[%d..%d] φ[%d..%d] step=%u\n",
 			       ss.pan_start_ddeg, ss.pan_end_ddeg,
 			       ss.tilt_start_ddeg, ss.tilt_end_ddeg, ss.step_ddeg);
 		}
@@ -197,7 +197,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "SCAN_STOP failed: %s\n", strerror(errno));
 			rc = 1;
 		} else {
-			printf("✓ CMD_SCAN_STOP 전송\n");
+			printf(" CMD_SCAN_STOP 전송\n");
 		}
 	}
 	else if (!strcmp(argv[1], "disarm")) {
@@ -205,7 +205,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "DISARM failed: %s\n", strerror(errno));
 			rc = 1;
 		} else {
-			printf("✓ CMD_DISARM 전송\n");
+			printf(" CMD_DISARM 전송\n");
 		}
 	}
 	else if (!strcmp(argv[1], "ping")) {
@@ -213,7 +213,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "PING failed: %s\n", strerror(errno));
 			rc = 1;
 		} else {
-			printf("✓ CMD_PING 전송 (PONG 은 state 의 pong_seq 로 확인)\n");
+			printf(" CMD_PING 전송 (PONG 은 state 의 pong_seq 로 확인)\n");
 		}
 	}
 	else if (!strcmp(argv[1], "state")) {

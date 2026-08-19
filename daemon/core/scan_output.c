@@ -3,7 +3,7 @@
  * ----------------------------------------------------------------------------
  *  담당: 이현우.  계약과 분리 근거는 scan_output.h 상단 참조.
  *
- *  ⚠️ 여기엔 epoll / ioctl / fd / 상태머신이 없다. 그래야 호스트에서 그대로
+ *  주의: 여기엔 epoll / ioctl / fd / 상태머신이 없다. 그래야 호스트에서 그대로
  *    링크해 격자·좌표변환을 검증할 수 있다. 리눅스 전용 API 를 들여오지 말 것.
  * ==========================================================================*/
 #include "scan_output.h"
@@ -22,7 +22,7 @@
 /* JSON 인터페이스 계약 버전 (PAN_TILT_LIDAR_JSON_INTERFACE.md) */
 #define JSON_IFACE_VERSION  "1.0"
 
-/* 0.1도 -> 라디안. ★ ANGLE_SCALE(=10) 나눗셈을 빠뜨리면 좌표가 통째로 틀어진다. */
+/* 0.1도 -> 라디안. 핵심: ANGLE_SCALE(=10) 나눗셈을 빠뜨리면 좌표가 통째로 틀어진다. */
 #define DDEG2RAD(x)   (((double)(x) / (double)ANGLE_SCALE) * (M_PI / 180.0))
 
 static uint64_t mono_ns(void)
@@ -124,15 +124,15 @@ struct scan_out {
  *      y = -range · sin(tilt)
  *      z =  range · cos(tilt) · cos(pan)
  *
- *  ⚠️ 여기서 range 는 라이다가 보고한 거리가 **아니다**.
+ *  주의: 여기서 range 는 라이다가 보고한 거리가 **아니다**.
  *        range = distance(라이다 보고) + LIDAR_RANGE_OFFSET_MM
  *    원점은 라이다 발광면이 아니라 팬/틸트 회전축 교점이다. 자세한 근거는
  *    LIDAR_RANGE_OFFSET_MM 정의 위 주석 참조.
  *
- *  ⚠️ 이전 ICD(z-up: x=d·cosφ·cosθ, y=d·cosφ·sinθ, z=d·sinφ)와 **축이 다르다**.
+ *  주의: 이전 ICD(z-up: x=d·cosφ·cosθ, y=d·cosφ·sinθ, z=d·sinφ)와 **축이 다르다**.
  *    2026-07-29 이전에 생성된 .pcd 는 옛 축이므로 섞어 쓰지 말 것.
- *  ⚠️ 단위도 mm → **meter** 로 변경(문서 01/02 계약).
- *  ⚠️ 센서 높이는 좌표에 **적용하지 않는다** — frame 이 lidar_scan(원점=센서)
+ *  주의: 단위도 mm → **meter** 로 변경(문서 01/02 계약).
+ *  주의: 센서 높이는 좌표에 **적용하지 않는다** — frame 이 lidar_scan(원점=센서)
  *    이기 때문. 높이는 scan.sensor_height_m 메타데이터로만 전달.
  * ------------------------------------------------------------------------- */
 
@@ -160,7 +160,7 @@ struct scan_out {
  *             m =   0  →  (p,     -90)   바닥
  *             m = +90  →  (p+180,   0)   벽 B 수평
  *
- *  ⚠️ nadir(계약 tilt=-90)는 극점이라 방위가 축퇴한다. 모든 팬 줄이 같은 점을
+ *  주의: nadir(계약 tilt=-90)는 극점이라 방위가 축퇴한다. 모든 팬 줄이 같은 점을
  *    보므로 그 행은 격자의 절반만 채워지는데, 버그가 아니라 구면 격자의 성질이다.
  * ------------------------------------------------------------------------- */
 static void mech_to_contract(int16_t mech_pan_ddeg, int16_t mech_tilt_ddeg,
@@ -238,7 +238,7 @@ static void grid_geometry(const struct scan_request *r, struct grid_geom *g)
      * 셀(JSON null / PCD NaN)로 남긴다. 열 번호가 절대 방위와 1:1 이 되어
      * 소비자 입장에서도 해석이 단순하다.
      *
-     * ⚠️ 열 수를 "스팬/스텝 + 1" 로 잡으면 안 된다. 팬 0~179(1도)는 스팬이
+     * 주의: 열 수를 "스팬/스텝 + 1" 로 잡으면 안 된다. 팬 0~179(1도)는 스팬이
      *   179 도지만 줄은 180 개고 방위는 360 개를 덮는다. 스팬 기준으로 세면
      *   359 가 나와 마지막 방위가 통째로 잘린다. */
     if (crosses_nadir && (tlo < 0) && (thi > 0)) {
@@ -353,7 +353,7 @@ struct scan_out *scan_out_open(const struct scan_request *req,
     (void)snprintf(o->js_path, sizeof(o->js_path), "%s/%s_%s_pan_tilt_lidar.json",
                    dir, o->session_id, o->scan_id);
 
-    /* ★ 여기서 **실제로 파일을 만들어 본다.**
+    /* 핵심: 여기서 **실제로 파일을 만들어 본다.**
      *
      * 산출물은 스캔이 다 끝난 뒤(scan_out_close)에야 기록된다 — 격자를 통째로
      * 메모리에 들고 있다가 마지막에 쓰기 때문이다. 그래서 쓰기 권한이 없으면
@@ -364,7 +364,7 @@ struct scan_out *scan_out_open(const struct scan_request *req,
      * 위의 mkdir 은 이걸 못 잡는다. 디렉토리가 이미 있으면 EEXIST 로 통과하는데,
      * "존재한다" 와 "쓸 수 있다" 는 다른 얘기다.
      *
-     * ⚠️ access(W_OK) 를 쓰지 않는다. 그건 **실제 uid** 로 검사해서 데몬이
+     * 주의: access(W_OK) 를 쓰지 않는다. 그건 **실제 uid** 로 검사해서 데몬이
      *   권한을 떨어뜨려 실행될 때 답이 틀리고, 읽기전용 마운트·디스크 가득 같은
      *   경우도 못 잡는다. 진짜로 열어보는 것이 유일하게 믿을 만한 검사다.
      *
@@ -555,7 +555,7 @@ static bool write_pcd(struct scan_out *o)
 
     const size_t n = (size_t)o->grid_rows * (size_t)o->grid_cols;
 
-    /* ⚠️ 센서 높이(z_offset)를 좌표에 **적용하지 않는다**.
+    /* 주의: 센서 높이(z_offset)를 좌표에 **적용하지 않는다**.
      *   frame 이름이 lidar_scan 이면 원점은 라이다 자신이므로, tilt=0 인 점의
      *   y 는 0 이어야 한다. 예전에 높이를 빼서 모든 y 가 -1.2m 로 찍혔는데,
      *   그건 사실상 actuator_base 계열 좌표라 라벨과 불일치였다(2026-07-29 수정).
@@ -602,7 +602,7 @@ static bool write_pcd(struct scan_out *o)
                           r * ct * cos(pan));
         }
     }
-    /* ⚠️ fclose 결과까지 본다. 디스크가 가득 찼거나 마운트가 사라진 경우
+    /* 주의: fclose 결과까지 본다. 디스크가 가득 찼거나 마운트가 사라진 경우
      *   fprintf 는 조용히 성공하고 **버퍼가 비워지는 fclose 에서야** 실패한다.
      *   여기서 안 보면 "산출 완료" 를 찍어놓고 실제 파일은 잘려 있게 된다. */
     const bool wr_ok = (ferror(fp) == 0);
@@ -666,7 +666,7 @@ static bool write_json(struct scan_out *o)
         "  \"session_id\": \"%s\",\n"
         "  \"scan_id\": \"%s\",\n"
         "  \"producer\": { \"software\": \"adts_daemon\", \"protocol_version\": %u },\n"
-        /* ★ range_offset_m — measurements[].distance_m 는 라이다 **발광면**
+        /* 핵심: range_offset_m — measurements[].distance_m 는 라이다 **발광면**
          *   기준 원거리다. 좌표 원점은 팬/틸트 회전축 교점이므로 소비자는
          *   반드시 r = distance_m + range_offset_m 으로 반경을 만든 뒤
          *   구면→직교 변환해야 한다. 빠뜨리면 장면 전체가 원점 쪽으로
@@ -768,14 +768,14 @@ static bool write_json(struct scan_out *o)
         } else {
             /* timestamp_ns = STM32 래치 시각(ms 해상도)을 ns 로 확장.
              *   RPi 수신 시각보다 정확하다(UART 큐잉 지연이 안 섞임).
-             *   ⚠️ 단 STM32 clock domain 이라 host 와 offset 미보정 →
+             *   주의: 단 STM32 clock domain 이라 host 와 offset 미보정 →
              *      quality_flags 에 TIMESTAMP_STM_CLOCK 을 남긴다.
-             * ⚠️ 아직 null 인 필드: encoder_count / encoder_timestamp
+             * 주의: 아직 null 인 필드: encoder_count / encoder_timestamp
              *   → 강유근 MT6701 엔코더 펌웨어 구현 후 채움.
              * range_precision (User Manual IIC 0x2C): **cm 단위**,
              *   0x00 = <1cm, 0xFF = >=255cm.
              *
-             * ⚠️ 실측(2026-07-29): F2 P 는 359/359 전부 **0xFF** 를 보낸다.
+             * 주의: 실측(2026-07-29): F2 P 는 359/359 전부 **0xFF** 를 보낸다.
              *   매뉴얼 §7.3.4 "If there is no corresponding parameter in the
              *   register, the default output is 0xff" 에 따라 **이 모델이
              *   지원하지 않는 필드**로 판단. 0.7m 측정에 정밀도 >=2.55m 는
@@ -844,17 +844,17 @@ static bool write_json(struct scan_out *o)
 }
 
 /* 격자를 두 포맷으로 산출하고 해제한다. */
-void scan_out_close(struct scan_out **po)
+bool scan_out_close(struct scan_out **po)
 {
     /* 중단·종료 경로에서 여러 번 불린다. 두 번째부터는 조용히 통과해야 한다. */
     if ((po == NULL) || (*po == NULL)) {
-        return;
+        return false;
     }
     struct scan_out *o = *po;
     const bool js_ok = write_json(o);   /* 변환 전 원시 (계약) */
     const bool pc_ok = write_pcd(o);    /* 변환 후 x/y/z (뷰어·편의) */
 
-    /* ⚠️ 실패해도 "산출 완료" 를 찍고 경로를 나열하던 시절이 있었다. 로그만
+    /* 주의: 실패해도 "산출 완료" 를 찍고 경로를 나열하던 시절이 있었다. 로그만
      *   보면 성공으로 보여서, 파일이 없는 걸 한참 뒤에야 알아챘다. 결과를
      *   말 그대로 적는다. */
     if (js_ok && pc_ok) {
@@ -866,13 +866,14 @@ void scan_out_close(struct scan_out **po)
         core_log(o->log, "SCAN", "  PCD : %s", o->pc_path);
     } else {
         core_log(o->log, "SCAN",
-                 "★ 산출 실패 (JSON=%s PCD=%s) — 유효했던 %u셀은 복구 불가",
+                 "핵심: 산출 실패 (JSON=%s PCD=%s) — 유효했던 %u셀은 복구 불가",
                  js_ok ? "ok" : "FAIL", pc_ok ? "ok" : "FAIL", o->pc_written);
     }
 
     free(o->grid);
     free(o);
     *po = NULL;
+    return js_ok && pc_ok;
 }
 
 /* 요청 범위·격자로 예상 점 수 산출 (진행률 표시용) */
@@ -916,7 +917,7 @@ void scan_out_warn_seam(const struct scan_request *r, void *log_core)
 
     if (seam) {
         core_log(log_core, "SCAN",
-                 "⚠ 팬 %d..%d 은 양끝이 같은 평면 — 방위 %d/%d 가 두 번 스캔된다. "
+                 "주의: 팬 %d..%d 은 양끝이 같은 평면 — 방위 %d/%d 가 두 번 스캔된다. "
                  "%d 까지만 돌리면 중복 0",
                  r->pan_start_ddeg, r->pan_end_ddeg,
                  r->pan_start_ddeg, (r->pan_start_ddeg + 1800) % 3600,
@@ -937,6 +938,11 @@ uint32_t scan_out_point_count(const struct scan_out *o)
 const char *scan_out_path(const struct scan_out *o)
 {
     return (o != NULL) ? o->pc_path : "";
+}
+
+const char *scan_out_json_path(const struct scan_out *o)
+{
+    return (o != NULL) ? o->js_path : "";
 }
 
 void scan_out_set_home(struct scan_out *o,

@@ -1,17 +1,19 @@
 /* ============================================================================
- *  led_sw_driver.c  --  RPi GPIO LED x3 & Switch x2 통합 캐릭터 디바이스 드라이버
+ *  led_sw_driver.c  --  RPi GPIO LED x3 & Switch x2 통합 캐릭터 디바이스
+ * 드라이버
  * ----------------------------------------------------------------------------
- *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버 (/dev/led_sw)
+ *  단일 디바이스 드라이버 모듈로 구현된 LED 및 스위치 제어 드라이버
+ * (/dev/led_sw)
  *
  *  하드웨어 구성 (BCM 번호 / 40핀 헤더 물리 번호):
- *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 27 / Pin 13
- *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 22 / Pin 15
- *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 17 / Pin 11
- *    - 부저              : 이벤트 알림        BCM 26 / Pin 37
+ *    - LED_초록 (Green)  : 제어코드 동작 중   BCM 17 / Pin 11
+ *    - LED_노랑 (Yellow) : 명령 대기 중       BCM 27 / Pin 13
+ *    - LED_빨강 (Red)    : 에러(코드) 발생    BCM 22 / Pin 15
+ *    - 부저              : 이벤트 알림        BCM 18 / Pin 12 (Hardware PWM0)
  *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
  *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
  *
- *  ⚠️ BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
+ *  주의: BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
  *    이 주석이 아래 모듈 파라미터 기본값과 어긋난 적이 있다(초록·노랑·빨강이
  *    전부 다르게 적혀 있었다). 배선하는 사람이 여기만 보고 꽂으면 LED 자리가
  *    바뀌므로, 핀을 옮기면 **이 표 / 모듈 파라미터 / 오버레이 / led_sw_test
@@ -24,61 +26,70 @@
  *    - kfifo + poll() + read() 로 스위치 눌림 이벤트를 유저 데몬에 비동기 전달
  * ==========================================================================*/
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
+#include <linux/compiler.h>
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/gpio.h>
+#include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/timer.h>
 #include <linux/jiffies.h>
-#include <linux/uaccess.h>
-#include <linux/miscdevice.h>
-#include <linux/mutex.h>
+#include <linux/kernel.h>
 #include <linux/kfifo.h>
-#include <linux/poll.h>
-#include <linux/wait.h>
+#include <linux/miscdevice.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
+#include <linux/poll.h>
+#include <linux/pwm.h>
+#include <linux/timer.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
-#include <linux/kthread.h>
-#include <linux/delay.h>
+#include <linux/wait.h>
 
 #include "../shared/led_sw.h"
 
 /* 커널 6.15+ 타이머 함수 이름 변경 호환성 매크로 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-  #define led_sw_del_timer_sync(t) timer_delete_sync(t)
+#ifndef KERNEL_VERSION
+#define KERNEL_VERSION(a, b, c) (((a) << 16) + ((b) << 8) + (c))
+#endif
+
+#if defined(LINUX_VERSION_CODE) &&                                             \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
+#define led_sw_del_timer_sync(t) timer_delete_sync(t)
 #else
-  #define led_sw_del_timer_sync(t) del_timer_sync(t)
+#define led_sw_del_timer_sync(t) del_timer_sync(t)
 #endif
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("VEDA Oppenheimer Team");
 MODULE_DESCRIPTION("RPi Integrated LED & Switch Character Driver");
-MODULE_VERSION("1.1");
+MODULE_VERSION("2.1");
 
 /* 모듈 파라미터 기본 핀 정의 (RPi4 BCM GPIO 번호) */
-static int gpio_green      = 27;  /* Physical Pin 13 (Green LED) */
-static int gpio_yellow     = 22;  /* Physical Pin 15 (Yellow LED) */
-static int gpio_red        = 17;  /* Physical Pin 11 (Red LED) */
-static int gpio_buzzer     = 26;  /* Physical Pin 37 (Buzzer) */
-static int gpio_scan_start = 23;  /* Physical Pin 16 (Scan Start Sw) */
-static int gpio_ems        = 24;  /* Physical Pin 18 (EMS Sw) */
+static int gpio_green = 17;      /* Physical Pin 11 (Green LED) */
+static int gpio_yellow = 27;     /* Physical Pin 13 (Yellow LED) */
+static int gpio_red = 22;        /* Physical Pin 15 (Red LED) */
+static int gpio_buzzer = 18;     /* Physical Pin 12 (Buzzer - Hardware PWM0) */
+static int gpio_scan_start = 23; /* Physical Pin 16 (Scan Start Sw) */
+static int gpio_ems = 24;        /* Physical Pin 18 (EMS Sw) */
 
 module_param(gpio_green, int, 0444);
-MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 27)");
+MODULE_PARM_DESC(gpio_green, "GPIO pin for Green LED (default: 17)");
 
 module_param(gpio_yellow, int, 0444);
-MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 22)");
+MODULE_PARM_DESC(gpio_yellow, "GPIO pin for Yellow LED (default: 27)");
 
 module_param(gpio_red, int, 0444);
-MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 17)");
+MODULE_PARM_DESC(gpio_red, "GPIO pin for Red LED (default: 22)");
 
+module_param(gpio_buzzer, int, 0444);
+MODULE_PARM_DESC(gpio_buzzer, "GPIO pin for Buzzer (default: 18, HW PWM0)");
 
 module_param(gpio_scan_start, int, 0444);
-MODULE_PARM_DESC(gpio_scan_start, "GPIO pin for Scan Start Switch (default: 23)");
+MODULE_PARM_DESC(gpio_scan_start,
+                 "GPIO pin for Scan Start Switch (default: 23)");
 
 module_param(gpio_ems, int, 0444);
 MODULE_PARM_DESC(gpio_ems, "GPIO pin for EMS Switch (default: 24)");
@@ -86,32 +97,51 @@ MODULE_PARM_DESC(gpio_ems, "GPIO pin for EMS Switch (default: 24)");
 #define EVENT_FIFO_SIZE 64
 #define DEBOUNCE_DELAY_MS 50
 
+#define BUZZER_PWM_PERIOD_NS 500000UL /* 500us = 2kHz */
+#define BUZZER_PWM_DUTY_NS 250000UL   /* 250us = 50% duty */
+
+/* gpio_owned 비트 — 어느 핀을 우리가 실제로 쥐고 있는가 */
+#define OWN_BUZZER     BIT(0)
+#define OWN_LED_GREEN  BIT(1)
+#define OWN_LED_YELLOW BIT(2)
+#define OWN_LED_RED    BIT(3)
+#define OWN_SW_SCAN    BIT(4)
+#define OWN_SW_EMS     BIT(5)
+
 struct led_sw_dev {
-	struct miscdevice misc;
-	struct mutex lock;
-	wait_queue_head_t wq;
+  struct miscdevice misc;
+  struct mutex lock;
+  wait_queue_head_t wq;
 
-	/* GPIO 번호 */
-	int pin_led_green;
-	int pin_led_yellow;
-	int pin_led_red;
-	int pin_buzzer;
-	int pin_sw_scan_start;
-	int pin_sw_ems;
+  /* GPIO 번호 */
+  int pin_led_green;
+  int pin_led_yellow;
+  int pin_led_red;
+  int pin_buzzer;
+  int pin_sw_scan_start;
+  int pin_sw_ems;
 
-	/* 폴링 타이머 (인터럽트 대체) */
-	struct timer_list poll_timer;
+  /* 폴링 타이머 (인터럽트 대체) */
+  struct timer_list poll_timer;
 
-	/* 수동 부저(Passive Buzzer)용 커널 스레드 (소프트웨어 PWM) */
-	struct task_struct *buzzer_thread;
-	int buzzer_toggle;
+  /* 수동 부저(Passive Buzzer)용 하드웨어 PWM 장치 */
+  struct pwm_device *pwm_buzzer;
 
-	/* LED 및 스위치 상태 캐시 */
-	u8 led_state[LED_MAX];
-	u8 sw_state[SW_MAX];
+  /* LED 및 스위치 상태 캐시 */
+  u8 led_state[LED_MAX];
+  u8 sw_state[SW_MAX];
+  bool misc_registered;
 
-	/* 이벤트 FIFO (read/poll) */
-	DECLARE_KFIFO(fifo, struct led_sw_event, EVENT_FIFO_SIZE);
+  /* gpio_request 에 **실제로 성공한** 핀만 표시한다.
+   *
+   * 주의: 이게 없으면 teardown 이 gpio_is_valid(pin) 만 보고 해제하는데, 핀
+   *   번호는 DT 파싱 시점에 이미 유효하므로 probe 가 중간에 실패하면 요청한
+   *   적 없는 핀까지 놓게 된다. 커널이 WARN_ON 을 띄우고, 그 핀을 다른
+   *   드라이버가 쥐고 있었다면 그쪽 소유를 빼앗는다. */
+  u32 gpio_owned;
+
+  /* 이벤트 FIFO (read/poll) */
+  DECLARE_KFIFO(fifo, struct led_sw_event, EVENT_FIFO_SIZE);
 };
 
 static struct led_sw_dev *g_led_sw = NULL;
@@ -123,275 +153,276 @@ static struct platform_device *g_plat_dev = NULL;
 /* ---------------------------------------------------------------------------
  *  스위치 폴링 타이머 (50ms 주기로 상태 확인)
  * ------------------------------------------------------------------------- */
-static void sw_poll_timer_handler(struct timer_list *t)
-{
-	struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
-	/* 스위치는 pull-up + active-low 라 눌리면 0 이다. 핀이 없으면 안 눌린
-	 * 것으로 본다 — 없는 스위치가 계속 눌린 상태로 보이면 EMS 가 상시 발동한다. */
-	u8 pressed_scan = 0, pressed_ems = 0;
+static void sw_poll_timer_handler(struct timer_list *t) {
+  struct led_sw_dev *dev = container_of(t, struct led_sw_dev, poll_timer);
+  /* 스위치는 pull-up + active-low 라 눌리면 0 이다. 핀이 없으면 안 눌린
+   * 것으로 본다 — 없는 스위치가 계속 눌린 상태로 보이면 EMS 가 상시 발동한다.
+   */
+  u8 pressed_scan = 0, pressed_ems = 0;
 
-	if (gpio_is_valid(dev->pin_sw_scan_start))
-		pressed_scan = (gpio_get_value(dev->pin_sw_scan_start) == 0) ? 1 : 0;
+  if (gpio_is_valid(dev->pin_sw_scan_start))
+    pressed_scan = (gpio_get_value(dev->pin_sw_scan_start) == 0) ? 1 : 0;
 
-	if (gpio_is_valid(dev->pin_sw_ems))
-		pressed_ems = (gpio_get_value(dev->pin_sw_ems) == 0) ? 1 : 0;
+  if (gpio_is_valid(dev->pin_sw_ems))
+    pressed_ems = (gpio_get_value(dev->pin_sw_ems) == 0) ? 1 : 0;
 
+  if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
+    dev->sw_state[SW_SCAN_START] = pressed_scan;
+    struct led_sw_event evt;
+    evt.sw_id = SW_SCAN_START;
+    evt.state = pressed_scan;
+    evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
-	if (pressed_scan != dev->sw_state[SW_SCAN_START]) {
-		dev->sw_state[SW_SCAN_START] = pressed_scan;
-		struct led_sw_event evt;
-		evt.sw_id = SW_SCAN_START;
-		evt.state = pressed_scan;
-		evt.timestamp_ms = jiffies_to_msecs(jiffies);
+    if (kfifo_put(&dev->fifo, evt))
+      wake_up_interruptible(&dev->wq);
+    pr_info("led_sw: SW_SCAN_START %s\n",
+            pressed_scan ? "pressed" : "released");
+  }
 
-		if (kfifo_put(&dev->fifo, evt))
-			wake_up_interruptible(&dev->wq);
-		pr_info("led_sw: SW_SCAN_START %s\n", pressed_scan ? "pressed" : "released");
-	}
+  if (pressed_ems != dev->sw_state[SW_EMS]) {
+    dev->sw_state[SW_EMS] = pressed_ems;
+    struct led_sw_event evt;
+    evt.sw_id = SW_EMS;
+    evt.state = pressed_ems;
+    evt.timestamp_ms = jiffies_to_msecs(jiffies);
 
-	if (pressed_ems != dev->sw_state[SW_EMS]) {
-		dev->sw_state[SW_EMS] = pressed_ems;
-		struct led_sw_event evt;
-		evt.sw_id = SW_EMS;
-		evt.state = pressed_ems;
-		evt.timestamp_ms = jiffies_to_msecs(jiffies);
+    if (kfifo_put(&dev->fifo, evt))
+      wake_up_interruptible(&dev->wq);
+    pr_info("led_sw: SW_EMS %s\n", pressed_ems ? "pressed" : "released");
+  }
 
-		if (kfifo_put(&dev->fifo, evt))
-			wake_up_interruptible(&dev->wq);
-		pr_info("led_sw: SW_EMS %s\n", pressed_ems ? "pressed" : "released");
-	}
-
-	mod_timer(&dev->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
+  mod_timer(&dev->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
 }
 
 /* ---------------------------------------------------------------------------
- *  수동 부저(Passive Buzzer) 커널 스레드 (소프트웨어 PWM)
+ *  수동 부저(Passive Buzzer) 하드웨어 PWM 제어 (CPU 점유율 0%)
  * ------------------------------------------------------------------------- */
-static int buzzer_kthread_func(void *data)
-{
-	struct led_sw_dev *dev = data;
-
-	while (!kthread_should_stop()) {
-		if (READ_ONCE(dev->led_state[LED_BUZZER])) {
-			dev->buzzer_toggle = !dev->buzzer_toggle;
-			gpio_set_value(dev->pin_buzzer, dev->buzzer_toggle);
-			
-			/* 수동 부저 (Passive Buzzer) 2kHz 정밀 톤 생성 (반주기 250us udelay).
-			 * usleep_range 는 커널 스케줄링 지터(1~4ms)로 인해 주파수가 100Hz 이하로 떨어져
-			 * 소리가 나지 않았음. udelay(250)으로 정밀 2kHz 톤 출력. */
-			udelay(250);
-			cond_resched();
-
-		} else {
-			gpio_set_value(dev->pin_buzzer, 0);
-			msleep(20);
-		}
-	}
-	return 0;
+static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
+  if (dev->pwm_buzzer) {
+    if (on) {
+      pwm_config(dev->pwm_buzzer, BUZZER_PWM_DUTY_NS, BUZZER_PWM_PERIOD_NS);
+      pwm_enable(dev->pwm_buzzer);
+    } else {
+      pwm_disable(dev->pwm_buzzer);
+    }
+  } else if ((dev->gpio_owned & OWN_BUZZER) && gpio_is_valid(dev->pin_buzzer)) {
+    gpio_set_value(dev->pin_buzzer, on ? 1 : 0);
+  }
 }
 
 /* ---------------------------------------------------------------------------
  *  하드웨어 제어 유틸리티
  * ------------------------------------------------------------------------- */
-static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on)
-{
-	int pin = -1;
-	on = !!on;
+static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on) {
+  int pin = -1;
+  u32 own = 0;
+  on = !!on;
 
-	switch (ch) {
-	case LED_GREEN:
-		pin = dev->pin_led_green;
-		break;
-	case LED_YELLOW:
-		pin = dev->pin_led_yellow;
-		break;
-	case LED_RED:
-		pin = dev->pin_led_red;
-		break;
+  switch (ch) {
+  case LED_GREEN:
+    pin = dev->pin_led_green;
+    own = OWN_LED_GREEN;
+    break;
+  case LED_YELLOW:
+    pin = dev->pin_led_yellow;
+    own = OWN_LED_YELLOW;
+    break;
+  case LED_RED:
+    pin = dev->pin_led_red;
+    own = OWN_LED_RED;
+    break;
+  case LED_BUZZER:
+    if (on != dev->led_state[LED_BUZZER]) {
+      WRITE_ONCE(dev->led_state[LED_BUZZER], on);
+      set_buzzer_hw_pwm(dev, on);
+    }
+    return;
+  default:
+    return;
+  }
 
-
-	case LED_BUZZER:
-		if (on != dev->led_state[LED_BUZZER]) {
-			WRITE_ONCE(dev->led_state[LED_BUZZER], on);
-			if (!on) {
-				gpio_set_value(dev->pin_buzzer, 0);
-			}
-		}
-		return; /* 수동 부저는 kthread가 led_state를 폴링하며 1kHz 펄스를 생성함 */
-	default:
-		return;
-	}
-
-
-	if (gpio_is_valid(pin)) {
-		gpio_set_value(pin, on);
-		dev->led_state[ch] = on;
-	}
+  /* 주의: 핀 번호가 유효한 것과 그 핀을 우리가 쥔 것은 다르다. 요청이
+   *   실패해도 probe 가 계속되는 경로가 있어(부저), 소유를 안 보면 남의
+   *   핀이나 미요청 핀에 값을 쓰게 된다. */
+  if ((dev->gpio_owned & own) && gpio_is_valid(pin)) {
+    gpio_set_value(pin, on);
+    dev->led_state[ch] = on;
+  }
 }
 
 /* ---------------------------------------------------------------------------
  *  File Operations (open, read, poll, ioctl)
  * ------------------------------------------------------------------------- */
-static int led_sw_open(struct inode *inode, struct file *file)
-{
-	(void)inode;
-	file->private_data = g_led_sw;
-	return 0;
+static int led_sw_open(struct inode *inode, struct file *file) {
+  (void)inode;
+  file->private_data = g_led_sw;
+  return 0;
 }
 
 /* cppcheck-suppress constParameterCallback ; file_operations read 콜백 ABI */
-static ssize_t led_sw_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
-{
-	struct led_sw_dev *dev = file->private_data;
-	struct led_sw_event evt;
+static ssize_t led_sw_read(struct file *file, char __user *buf, size_t count,
+                           loff_t *ppos) {
+  struct led_sw_dev *dev = file->private_data;
+  struct led_sw_event evt;
 
-	(void)ppos;
-	if (count < sizeof(struct led_sw_event))
-		return -EINVAL;
+  (void)ppos;
+  if (count < sizeof(struct led_sw_event))
+    return -EINVAL;
 
-	if (!dev)
-		return -ENODEV;
+  if (!dev)
+    return -ENODEV;
 
-	if (kfifo_is_empty(&dev->fifo)) {
-		int ret;
+  if (kfifo_is_empty(&dev->fifo)) {
+    int ret;
 
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
+    if (file->f_flags & O_NONBLOCK)
+      return -EAGAIN;
 
-		ret = wait_event_interruptible(dev->wq, !kfifo_is_empty(&dev->fifo));
-		if (ret)
-			return ret;
-	}
+    ret = wait_event_interruptible(dev->wq, !kfifo_is_empty(&dev->fifo));
+    if (ret)
+      return ret;
+  }
 
-	if (!kfifo_get(&dev->fifo, &evt))
-		return -EAGAIN;
+  if (!kfifo_get(&dev->fifo, &evt))
+    return -EAGAIN;
 
-	if (copy_to_user(buf, &evt, sizeof(struct led_sw_event)))
-		return -EFAULT;
+  if (copy_to_user(buf, &evt, sizeof(struct led_sw_event)))
+    return -EFAULT;
 
-	return sizeof(struct led_sw_event);
+  return sizeof(struct led_sw_event);
 }
 
-static __poll_t led_sw_poll(struct file *file, poll_table *wait)
-{
-	struct led_sw_dev *dev = file->private_data;
-	__poll_t mask = 0;
+static __poll_t led_sw_poll(struct file *file, poll_table *wait) {
+  struct led_sw_dev *dev = file->private_data;
+  __poll_t mask = 0;
 
-	if (!dev)
-		return EPOLLERR;
+  if (!dev)
+    return EPOLLERR;
 
-	poll_wait(file, &dev->wq, wait);
+  poll_wait(file, &dev->wq, wait);
 
-	if (!kfifo_is_empty(&dev->fifo))
-		mask |= (EPOLLIN | EPOLLRDNORM);
+  if (!kfifo_is_empty(&dev->fifo))
+    mask |= (EPOLLIN | EPOLLRDNORM);
 
-	return mask;
+  return mask;
 }
 
-/* cppcheck-suppress constParameterCallback ; file_operations unlocked_ioctl 콜백 ABI */
-static long led_sw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct led_sw_dev *dev = file->private_data;
+/* cppcheck-suppress constParameterCallback ; file_operations unlocked_ioctl
+ * 콜백 ABI */
+static long led_sw_ioctl(struct file *file, unsigned int cmd,
+                         unsigned long arg) {
+  struct led_sw_dev *dev = file->private_data;
 
-	if (!dev)
-		return -ENODEV;
+  if (!dev)
+    return -ENODEV;
 
-	switch (cmd) {
-	case LED_SW_SET_LEDS: {
-		struct led_sw_ctrl ctrl;
+  switch (cmd) {
+  case LED_SW_SET_LEDS: {
+    struct led_sw_ctrl ctrl;
 
-		if (copy_from_user(&ctrl, (void __user *)arg, sizeof(ctrl)))
-			return -EFAULT;
+    if (copy_from_user(&ctrl, (void __user *)arg, sizeof(ctrl)))
+      return -EFAULT;
 
-		mutex_lock(&dev->lock);
-		set_led_hw(dev, LED_GREEN,  ctrl.green);
-		set_led_hw(dev, LED_YELLOW, ctrl.yellow);
-		set_led_hw(dev, LED_RED,    ctrl.red);
-		set_led_hw(dev, LED_BUZZER, ctrl.buzzer);
-		mutex_unlock(&dev->lock);
-		break;
-	}
-	case LED_SW_SET_SINGLE: {
-		u32 val = (u32)arg;
-		u16 ch = (val >> 16) & 0xFFFF;
-		u8 on = val & 0xFF;
+    mutex_lock(&dev->lock);
+    set_led_hw(dev, LED_GREEN, ctrl.green);
+    set_led_hw(dev, LED_YELLOW, ctrl.yellow);
+    set_led_hw(dev, LED_RED, ctrl.red);
+    set_led_hw(dev, LED_BUZZER, ctrl.buzzer);
+    mutex_unlock(&dev->lock);
+    break;
+  }
+  case LED_SW_SET_SINGLE: {
+    u32 val = (u32)arg;
+    u16 ch = (val >> 16) & 0xFFFF;
+    u8 on = val & 0xFF;
 
-		if (ch >= LED_MAX)
-			return -EINVAL;
+    if (ch >= LED_MAX)
+      return -EINVAL;
 
-		mutex_lock(&dev->lock);
-		set_led_hw(dev, (enum led_channel)ch, on);
-		mutex_unlock(&dev->lock);
-		break;
-	}
-	case LED_SW_GET_STATE: {
-		struct led_sw_state st;
+    mutex_lock(&dev->lock);
+    set_led_hw(dev, (enum led_channel)ch, on);
+    mutex_unlock(&dev->lock);
+    break;
+  }
+  case LED_SW_GET_STATE: {
+    struct led_sw_state st;
 
-		mutex_lock(&dev->lock);
-		st.leds[LED_GREEN]  = dev->led_state[LED_GREEN];
-		st.leds[LED_YELLOW] = dev->led_state[LED_YELLOW];
-		st.leds[LED_RED]    = dev->led_state[LED_RED];
-		st.leds[LED_BUZZER] = dev->led_state[LED_BUZZER];
+    mutex_lock(&dev->lock);
+    st.leds[LED_GREEN] = dev->led_state[LED_GREEN];
+    st.leds[LED_YELLOW] = dev->led_state[LED_YELLOW];
+    st.leds[LED_RED] = dev->led_state[LED_RED];
+    st.leds[LED_BUZZER] = dev->led_state[LED_BUZZER];
 
-		st.sw[SW_SCAN_START] = dev->sw_state[SW_SCAN_START];
-		st.sw[SW_EMS]        = dev->sw_state[SW_EMS];
-		mutex_unlock(&dev->lock);
+    st.sw[SW_SCAN_START] = dev->sw_state[SW_SCAN_START];
+    st.sw[SW_EMS] = dev->sw_state[SW_EMS];
+    mutex_unlock(&dev->lock);
 
-		if (copy_to_user((void __user *)arg, &st, sizeof(st)))
-			return -EFAULT;
-		break;
-	}
-	default:
-		return -ENOTTY;
-	}
+    if (copy_to_user((void __user *)arg, &st, sizeof(st)))
+      return -EFAULT;
+    break;
+  }
+  default:
+    return -ENOTTY;
+  }
 
-	return 0;
+  return 0;
 }
 
 static struct file_operations led_sw_fops = {
-	.owner          = THIS_MODULE,
-	.open           = led_sw_open,
-	.read           = led_sw_read,
-	.poll           = led_sw_poll,
-	.unlocked_ioctl = led_sw_ioctl,
-	.llseek         = noop_llseek,
+    .owner = THIS_MODULE,
+    .open = led_sw_open,
+    .read = led_sw_read,
+    .poll = led_sw_poll,
+    .unlocked_ioctl = led_sw_ioctl,
+    .llseek = noop_llseek,
 };
 
 /* ---------------------------------------------------------------------------
  *  GPIO 요청 헬퍼 (재시도 및 에러 처리)
  * ------------------------------------------------------------------------- */
-static int request_gpio_safe(int pin, unsigned long flags, const char *label)
-{
-	int ret;
+static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
+  int ret;
 
-	if (!gpio_is_valid(pin))
-		return -EINVAL;
+  if (!gpio_is_valid(pin))
+    return -EINVAL;
 
-	ret = gpio_request_one(pin, flags, label);
+  ret = gpio_request_one(pin, flags, label);
 
-	/* ⚠️ -EPROBE_DEFER 는 여기서 되돌리지 않는다.
-	 *
-	 *   그 코드의 뜻은 "내가 기대는 리소스(gpiochip 등)가 아직 준비되지
-	 *   않았으니 **나중에 다시 불러 달라**" 이다. 즉시 재요청해도 상황이
-	 *   바뀔 리가 없고, 오히려 커널이 준비된 뒤 probe 를 다시 불러줄
-	 *   기회를 없애 deferral 자체를 무력화한다. 그대로 올려보낸다.
-	 *
-	 * ⚠️ -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
-	 *   필요했던 우회이고, 재현할 보드 없이 빼면 probe 가 실패할 수 있다.
-	 *   다만 이건 **남이 쥔 GPIO 를 강제로 뺏는** 동작이라 안전하지 않다.
-	 *   원인 후보:
-	 *     ① 이전 insmod 의 정리 누락으로 우리 자신의 낡은 요청이 남음
-	 *        (remove 경로 결함이 있었으므로 유력하다 — 정리 수정 후
-	 *         -EBUSY 가 아직도 나는지 다시 볼 것)
-	 *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
-	 *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
-	if (ret == -EBUSY) {
-		pr_warn("led_sw: gpio %d busy — 강제 회수 후 재시도 (%s)\n",
-			pin, label);
-		gpio_free(pin);
-		ret = gpio_request_one(pin, flags, label);
-	}
-	return ret;
+  /* 주의: -EPROBE_DEFER 는 여기서 되돌리지 않는다.
+   *
+   *   그 코드의 뜻은 "내가 기대는 리소스(gpiochip 등)가 아직 준비되지
+   *   않았으니 **나중에 다시 불러 달라**" 이다. 즉시 재요청해도 상황이
+   *   바뀔 리가 없고, 오히려 커널이 준비된 뒤 probe 를 다시 불러줄
+   *   기회를 없애 deferral 자체를 무력화한다. 그대로 올려보낸다.
+   *
+   * 주의: -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
+   *   필요했던 우회이고, 재현할 보드 없이 빼면 probe 가 실패할 수 있다.
+   *   다만 이건 **남이 쥔 GPIO 를 강제로 뺏는** 동작이라 안전하지 않다.
+   *   원인 후보:
+   *     ① 이전 insmod 의 정리 누락으로 우리 자신의 낡은 요청이 남음
+   *        (remove 경로 결함이 있었으므로 유력하다 — 정리 수정 후
+   *         -EBUSY 가 아직도 나는지 다시 볼 것)
+   *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
+   *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
+  if (ret == -EBUSY || ret == -EPROBE_DEFER) {
+    pr_warn("led_sw: gpio %d 첫 요청 실패(%d) — 회수 후 재시도 (%s)\n", pin, ret,
+            label);
+    gpio_free(pin);
+    ret = gpio_request_one(pin, flags, label);
+
+    /* 재시도도 defer 면 그건 진짜 "아직 준비 안 됐다" 이므로 그대로 올린다.
+     * 여기서 삼키면 커널이 나중에 probe 를 다시 불러줄 기회를 없앤다. */
+  }
+  return ret;
+}
+
+/* request_gpio_safe + 소유 표시. 성공한 핀만 teardown 이 해제한다. */
+static int claim_gpio(int pin, unsigned long flags, const char *label, u32 bit) {
+  const int ret = request_gpio_safe(pin, flags, label);
+
+  if (ret == 0)
+    g_led_sw->gpio_owned |= bit;
+  return ret;
 }
 
 /* ---------------------------------------------------------------------------
@@ -405,229 +436,299 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label)
  * 여기에 misc_deregister 를 넣으면 실패 경로가 등록도 안 된 걸 해제하려 들고,
  * 빼면 remove 경로에서 문자 디바이스가 남는다. 그래서 **호출자가** 책임진다.
  *
- * ⚠️ 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
+ * 주의: 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
  *   /dev/led_sw 가 등록된 채라 fops 가 사라진 모듈을 가리킨다. 누가 열면
  *   use-after-free 다. 재적재 시 같은 이름으로 misc_register 가 또 불려
  *   실패할 수도 있다. */
-static void led_sw_teardown(void)
-{
-	if (g_led_sw) {
-		if (g_led_sw->buzzer_thread) {
-			kthread_stop(g_led_sw->buzzer_thread);
-			g_led_sw->buzzer_thread = NULL;
+static void led_sw_teardown(void) {
+  if (g_led_sw) {
+    if (g_led_sw->misc_registered) {
+      misc_deregister(&g_led_sw->misc);
+      g_led_sw->misc_registered = false;
+    }
+
+    led_sw_del_timer_sync(&g_led_sw->poll_timer);
+
+    /* LED 및 부저 소등 후 해제 */
+    set_led_hw(g_led_sw, LED_GREEN, 0);
+    set_led_hw(g_led_sw, LED_YELLOW, 0);
+    set_led_hw(g_led_sw, LED_RED, 0);
+    set_led_hw(g_led_sw, LED_BUZZER, 0);
+
+    if (g_led_sw->pwm_buzzer) {
+      /* 소리를 끄기만 한다. **pwm_put 은 부르지 않는다** —
+       * devm_pwm_get 으로 받았으므로 커널이 디바이스 정리 때
+       * 알아서 놓는다. 여기서 또 놓으면 이중 해제다. */
+      pwm_disable(g_led_sw->pwm_buzzer);
+      g_led_sw->pwm_buzzer = NULL;
+    }
+
+    /* 주의: gpio_is_valid 가 아니라 **소유 비트**를 본다. 핀 번호는 DT 를 읽은
+     *   순간 유효해지므로, 그것만 보면 요청이 실패했거나 아직 요청하지 않은
+     *   핀까지 해제하게 된다(WARN_ON, 그리고 남이 쥔 핀이면 그쪽 소유 파괴). */
+    if (g_led_sw->gpio_owned & OWN_SW_EMS)
+      gpio_free(g_led_sw->pin_sw_ems);
+    if (g_led_sw->gpio_owned & OWN_SW_SCAN)
+      gpio_free(g_led_sw->pin_sw_scan_start);
+    if (g_led_sw->gpio_owned & OWN_BUZZER)
+      gpio_free(g_led_sw->pin_buzzer);
+    if (g_led_sw->gpio_owned & OWN_LED_RED)
+      gpio_free(g_led_sw->pin_led_red);
+    if (g_led_sw->gpio_owned & OWN_LED_YELLOW)
+      gpio_free(g_led_sw->pin_led_yellow);
+    if (g_led_sw->gpio_owned & OWN_LED_GREEN)
+      gpio_free(g_led_sw->pin_led_green);
+    g_led_sw->gpio_owned = 0;
+
+    g_led_sw = NULL;
+  }
+}
+
+static int led_sw_probe(struct platform_device *pdev) {
+  struct device_node *np = pdev->dev.of_node;
+  int ret;
+
+  if (g_led_sw)
+    return 0; /* 이미 초기화됨 */
+
+  g_led_sw = devm_kzalloc(&pdev->dev, sizeof(*g_led_sw), GFP_KERNEL);
+  if (!g_led_sw)
+    return -ENOMEM;
+
+  mutex_init(&g_led_sw->lock);
+  init_waitqueue_head(&g_led_sw->wq);
+  INIT_KFIFO(g_led_sw->fifo);
+
+  /* DeviceTree 노드 속성 해석 (없으면 모듈 파라미터 기본값 적용) */
+  g_led_sw->pin_led_green = gpio_green;
+  g_led_sw->pin_led_yellow = gpio_yellow;
+  g_led_sw->pin_led_red = gpio_red;
+  g_led_sw->pin_buzzer = gpio_buzzer;
+  g_led_sw->pin_sw_scan_start = gpio_scan_start;
+  g_led_sw->pin_sw_ems = gpio_ems;
+
+  if (np) {
+    static const struct {
+      const char *prop;
+      size_t      off;
+    } dt_pins[] = {
+      { "gpios-led-green",     offsetof(struct led_sw_dev, pin_led_green)     },
+      { "gpios-led-yellow",    offsetof(struct led_sw_dev, pin_led_yellow)    },
+      { "gpios-led-red",       offsetof(struct led_sw_dev, pin_led_red)       },
+      { "gpios-sw-scan-start", offsetof(struct led_sw_dev, pin_sw_scan_start) },
+      { "gpios-sw-ems",        offsetof(struct led_sw_dev, pin_sw_ems)        },
+      { "gpios-buzzer",        offsetof(struct led_sw_dev, pin_buzzer)        },
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(dt_pins); i++) {
+      const int gpio_tmp = of_get_named_gpio(np, dt_pins[i].prop, 0);
+
+      if (gpio_tmp >= 0) {
+        *(int *)((char *)g_led_sw + dt_pins[i].off) = gpio_tmp;
+        continue;
+      }
+
+      /* 주의: -EPROBE_DEFER 를 여기서 삼키면 안 된다. 예전 코드는
+       *   `if (gpio_tmp >= 0)` 하나로 모든 실패를 "DT 에 값이 없다" 로 보고
+       *   모듈 파라미터 기본값(17, 27, ...)으로 떨어졌는데, **그 번호로는
+       *   절대 성공할 수 없다.** 이 커널의 gpiochip base 가 512 라서
+       *   BCM 17 의 전역 번호는 529 이고, 전역 17 은 어느 칩에도 속하지
+       *   않아 gpio_request_one() 이 다시 -EPROBE_DEFER 를 낸다. 즉 한 번의
+       *   유예를 영구 실패로 바꿔놓고 그 사실을 로그로도 안 남겼다
+       *   (실측: 부팅 6.7초에 이미 이 경로를 타고 있었다).
+       *
+       *   DT 노드가 있으면 DT 가 유일한 진실이다. 유예는 그대로 올려보내
+       *   커널이 다시 부르게 하고, 그 외 오류는 실패로 끝낸다. */
+      if (gpio_tmp == -EPROBE_DEFER) {
+        pr_info("led_sw: %s — gpio 컨트롤러 준비 대기(재시도 예정)\n",
+                dt_pins[i].prop);
+      } else {
+        pr_err("led_sw: %s 해석 실패: %d\n", dt_pins[i].prop, gpio_tmp);
+      }
+      g_led_sw = NULL;   /* devm 이 회수하므로 포인터를 남기면 안 된다 */
+      return gpio_tmp;
+    }
+  }
+
+	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%).
+	 * devm 으로 받은 것을 teardown 에서 pwm_put() 하면 이중 해제가 나므로 devm 에 일임.
+	 * -EPROBE_DEFER 는 삼키지 않고 그대로 반환하여 probe 재시도 유도. */
+	g_led_sw->pwm_buzzer = devm_pwm_get(&pdev->dev, "buzzer");
+	if (IS_ERR(g_led_sw->pwm_buzzer)) {
+		const int perr = PTR_ERR(g_led_sw->pwm_buzzer);
+
+		g_led_sw->pwm_buzzer = NULL;
+		if (perr == -EPROBE_DEFER) {
+			/* 주의: 전역 포인터를 반드시 비우고 나간다. devm_kzalloc 으로 받은
+			 *   메모리는 probe 가 실패하면 **커널이 회수한다**. 포인터만
+			 *   남겨두면 재probe 가 맨 위의 "이미 초기화됨" 검사에 걸려
+			 *   아무것도 안 하고 0 을 반환하고, 이후 접근은 해제된 메모리를
+			 *   건드린다(use-after-free).
+			 *
+			 *   led_sw_teardown() 을 부르지 않는 이유: 이 지점까지 잡은
+			 *   자원이 없다. GPIO 요청·타이머·kthread·misc 등록이 전부
+			 *   아래에 있어서, teardown 을 부르면 초기화된 적 없는 타이머를
+			 *   del_timer_sync 하고 요청한 적 없는 핀에 값을 쓰게 된다. */
+			g_led_sw = NULL;
+			return perr;
 		}
-
-		led_sw_del_timer_sync(&g_led_sw->poll_timer);
-
-		/* LED 및 부저 소등 후 해제 */
-		set_led_hw(g_led_sw, LED_GREEN, 0);
-		set_led_hw(g_led_sw, LED_YELLOW, 0);
-		set_led_hw(g_led_sw, LED_RED, 0);
-		set_led_hw(g_led_sw, LED_BUZZER, 0);
-
-		if (gpio_is_valid(g_led_sw->pin_sw_ems))
-			gpio_free(g_led_sw->pin_sw_ems);
-		if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
-			gpio_free(g_led_sw->pin_sw_scan_start);
-		if (gpio_is_valid(g_led_sw->pin_buzzer))
-			gpio_free(g_led_sw->pin_buzzer);
-		if (gpio_is_valid(g_led_sw->pin_led_red))
-			gpio_free(g_led_sw->pin_led_red);
-		if (gpio_is_valid(g_led_sw->pin_led_yellow))
-			gpio_free(g_led_sw->pin_led_yellow);
-		if (gpio_is_valid(g_led_sw->pin_led_green))
-			gpio_free(g_led_sw->pin_led_green);
-
-		g_led_sw = NULL;
+		pr_info("led_sw: hardware PWM 없음 (%d) — GPIO 폴백\n", perr);
 	}
+
+  if (g_led_sw->pwm_buzzer) {
+    pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
+  } else {
+    /* Hardware PWM 미사용 시에만 일반 GPIO 요청 */
+    ret = claim_gpio(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer",
+                     OWN_BUZZER);
+    if (ret) {
+      pr_warn("led_sw: gpio buzzer (%d) request warning: %d\n",
+              g_led_sw->pin_buzzer, ret);
+    }
+  }
+
+  /* GPIO 요청 - LED */
+  ret = claim_gpio(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green",
+                    OWN_LED_GREEN);
+  if (ret) {
+    pr_err("led_sw: gpio green (%d) request failed: %d\n",
+           g_led_sw->pin_led_green, ret);
+    goto err_teardown;
+  }
+
+  ret = claim_gpio(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow",
+                    OWN_LED_YELLOW);
+  if (ret) {
+    pr_err("led_sw: gpio yellow (%d) request failed: %d\n",
+           g_led_sw->pin_led_yellow, ret);
+    goto err_teardown;
+  }
+
+  ret = claim_gpio(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red",
+                    OWN_LED_RED);
+  if (ret) {
+    pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red,
+           ret);
+    goto err_teardown;
+  }
+
+  /* GPIO 요청 - Switches */
+  ret =
+      claim_gpio(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start",
+                    OWN_SW_SCAN);
+  if (ret) {
+    pr_err("led_sw: gpio scan_start (%d) request failed: %d\n",
+           g_led_sw->pin_sw_scan_start, ret);
+    goto err_teardown;
+  }
+
+  ret = claim_gpio(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems", OWN_SW_EMS);
+  if (ret) {
+    pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems,
+           ret);
+    goto err_teardown;
+  }
+
+  /* 폴링 타이머 초기화 및 시작 (50ms) */
+  timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
+  mod_timer(&g_led_sw->poll_timer,
+            jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
+
+  /* misc device 등록 (/dev/led_sw) */
+  g_led_sw->misc.minor = MISC_DYNAMIC_MINOR;
+  g_led_sw->misc.name = LED_SW_DEV_NAME;
+  g_led_sw->misc.fops = &led_sw_fops;
+  g_led_sw->misc.mode = 0666;
+  g_led_sw->misc.nodename = LED_SW_DEV_NAME;
+
+  ret = misc_register(&g_led_sw->misc);
+  if (ret) {
+    pr_err("led_sw: misc_register failed: %d\n", ret);
+    goto err_teardown;
+  }
+  g_led_sw->misc_registered = true;
+
+  platform_set_drvdata(pdev, g_led_sw);
+  pr_info("led_sw: driver probed & registered successfully (/dev/%s)\n",
+          LED_SW_DEV_NAME);
+  return 0;
+
+err_teardown:
+  led_sw_teardown();
+  return ret;
 }
 
-static int led_sw_probe(struct platform_device *pdev)
-{
-	struct device_node *np = pdev->dev.of_node;
-	int ret;
-
-	if (g_led_sw)
-		return 0; /* 이미 초기화됨 */
-
-	g_led_sw = devm_kzalloc(&pdev->dev, sizeof(*g_led_sw), GFP_KERNEL);
-	if (!g_led_sw)
-		return -ENOMEM;
-
-	mutex_init(&g_led_sw->lock);
-	init_waitqueue_head(&g_led_sw->wq);
-	INIT_KFIFO(g_led_sw->fifo);
-
-	/* DeviceTree 노드 속성 해석 (없으면 모듈 파라미터 기본값 적용) */
-	g_led_sw->pin_led_green     = gpio_green;
-	g_led_sw->pin_led_yellow    = gpio_yellow;
-	g_led_sw->pin_led_red       = gpio_red;
-	g_led_sw->pin_buzzer        = gpio_buzzer;
-	g_led_sw->pin_sw_scan_start = gpio_scan_start;
-	g_led_sw->pin_sw_ems        = gpio_ems;
-
-	if (np) {
-		int gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-led-green", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_led_green = gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-led-yellow", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_led_yellow = gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-led-red", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_led_red = gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-sw-scan-start", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_sw_scan_start = gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-sw-ems", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_sw_ems = gpio_tmp;
-
-		gpio_tmp = of_get_named_gpio(np, "gpios-buzzer", 0);
-		if (gpio_tmp >= 0)
-			g_led_sw->pin_buzzer = gpio_tmp;
-	}
-
-	/* GPIO 요청 - LED */
-	ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green");
-	if (ret) {
-		pr_err("led_sw: gpio green (%d) request failed: %d\n", g_led_sw->pin_led_green, ret);
-		return ret;
-	}
-
-	ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow");
-	if (ret) {
-		pr_err("led_sw: gpio yellow (%d) request failed: %d\n", g_led_sw->pin_led_yellow, ret);
-		return ret;
-	}
-
-	ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
-	if (ret) {
-		pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red, ret);
-		return ret;
-	}
-
-	ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
-	if (ret) {
-		pr_err("led_sw: gpio buzzer (%d) request failed: %d\n", g_led_sw->pin_buzzer, ret);
-		return ret;
-	}
-
-	/* GPIO 요청 - Switches */
-	ret = request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
-	if (ret) {
-		pr_err("led_sw: gpio scan_start (%d) request failed: %d\n", g_led_sw->pin_sw_scan_start, ret);
-		return ret;
-	}
-
-	ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
-	if (ret) {
-		pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems, ret);
-		return ret;
-	}
-
-	/* 폴링 타이머 초기화 및 시작 (50ms) */
-	timer_setup(&g_led_sw->poll_timer, sw_poll_timer_handler, 0);
-	mod_timer(&g_led_sw->poll_timer, jiffies + msecs_to_jiffies(DEBOUNCE_DELAY_MS));
-
-	/* 수동 부저(Passive Buzzer)용 커널 스레드 시작 */
-	g_led_sw->buzzer_thread = kthread_run(buzzer_kthread_func, g_led_sw, "buzzer_pwm_thread");
-	if (IS_ERR(g_led_sw->buzzer_thread)) {
-		pr_warn("led_sw: Failed to create buzzer kthread\n");
-		g_led_sw->buzzer_thread = NULL;
-	}
-
-	/* misc device 등록 (/dev/led_sw) */
-	g_led_sw->misc.minor    = MISC_DYNAMIC_MINOR;
-	g_led_sw->misc.name     = LED_SW_DEV_NAME;
-	g_led_sw->misc.fops     = &led_sw_fops;
-	g_led_sw->misc.mode     = 0666;
-	g_led_sw->misc.nodename = LED_SW_DEV_NAME;
-
-	ret = misc_register(&g_led_sw->misc);
-	if (ret) {
-		/* ⚠️ 예전엔 로그만 남기고 0 을 반환했다. 그러면 /dev/led_sw 가 없는데도
-		 *   insmod 가 성공하고 probe 성공 로그까지 찍혀서, 데몬이 "open 실패 →
-		 *   degraded" 로 조용히 넘어간 이유를 찾기 어려웠다. 실패는 실패로 알린다. */
-		pr_err("led_sw: misc_register failed: %d\n", ret);
-		led_sw_teardown();
-		return ret;
-	}
-
-	platform_set_drvdata(pdev, g_led_sw);
-	pr_info("led_sw: driver probed & registered successfully (/dev/%s)\n", LED_SW_DEV_NAME);
-	return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-static void led_sw_remove(struct platform_device *pdev)
-{
-	(void)pdev;
-	if (g_led_sw)
-		misc_deregister(&g_led_sw->misc);
-	led_sw_teardown();
-	pr_info("led_sw: driver removed\n");
+#if defined(LINUX_VERSION_CODE) && \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+static void led_sw_remove(struct platform_device *pdev) {
+  (void)pdev;
+  led_sw_teardown();
+  pr_info("led_sw: driver removed\n");
 }
 #else
-static int led_sw_remove(struct platform_device *pdev)
-{
-	(void)pdev;
-	if (g_led_sw)
-		misc_deregister(&g_led_sw->misc);
-	led_sw_teardown();
-	pr_info("led_sw: driver removed\n");
-	return 0;
+static int led_sw_remove(struct platform_device *pdev) {
+  (void)pdev;
+  led_sw_teardown();
+  pr_info("led_sw: driver removed\n");
+  return 0;
 }
 #endif
 
 static const struct of_device_id led_sw_of_match[] = {
-	{ .compatible = "adts,led-sw" },
-	{ }
-};
+    {.compatible = "adts,led-sw"}, {}};
 MODULE_DEVICE_TABLE(of, led_sw_of_match);
 
 static struct platform_driver led_sw_platform_driver = {
-	.probe  = led_sw_probe,
-	.remove = led_sw_remove,
-	.driver = {
-		.name           = "led_sw_custom",
-		.of_match_table = led_sw_of_match,
-		.owner          = THIS_MODULE,
-	},
+    .probe = led_sw_probe,
+    .remove = led_sw_remove,
+    .driver =
+        {
+            .name = "led_sw_custom",
+            .of_match_table = led_sw_of_match,
+            .owner = THIS_MODULE,
+        },
 };
 
 /* ---------------------------------------------------------------------------
  *  Init & Exit
  * ------------------------------------------------------------------------- */
-static int __init led_sw_init(void)
-{
-	(void)platform_driver_register(&led_sw_platform_driver);
+static int __init led_sw_init(void) {
+  int ret;
 
-	/* DT 오버레이가 미로딩되었거나 probe 수동 호출 필요 시 폴백 생성 */
-	if (!g_led_sw) {
-		g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
-		if (IS_ERR(g_plat_dev)) {
-			g_plat_dev = NULL;
-		}
-	}
+  ret = platform_driver_register(&led_sw_platform_driver);
+  if (ret)
+    return ret;
 
-	return 0;
+  /* DT 오버레이가 미로딩되었거나 probe 수동 호출 필요 시 폴백 생성 */
+  if (!g_led_sw) {
+    g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
+    if (IS_ERR(g_plat_dev)) {
+      ret = PTR_ERR(g_plat_dev);
+      g_plat_dev = NULL;
+      platform_driver_unregister(&led_sw_platform_driver);
+      return ret;
+    }
+
+    /* 폴백 장치로도 probe 가 실패한 경우 */
+    if (!g_led_sw) {
+      platform_device_unregister(g_plat_dev);
+      g_plat_dev = NULL;
+      platform_driver_unregister(&led_sw_platform_driver);
+      return -ENODEV;
+    }
+  }
+
+  return 0;
 }
 
-static void __exit led_sw_exit(void)
-{
-	if (g_plat_dev) {
-		platform_device_unregister(g_plat_dev);
-		g_plat_dev = NULL;
-	}
-	platform_driver_unregister(&led_sw_platform_driver);
-	pr_info("led_sw: module exit completed\n");
+static void __exit led_sw_exit(void) {
+  if (g_plat_dev) {
+    platform_device_unregister(g_plat_dev);
+    g_plat_dev = NULL;
+  }
+  platform_driver_unregister(&led_sw_platform_driver);
+  pr_info("led_sw: module exit completed\n");
 }
 
 module_init(led_sw_init);

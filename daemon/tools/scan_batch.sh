@@ -23,12 +23,21 @@ set -uo pipefail
 COUNT=5                 # 반복 횟수
 INTERVAL=15             # 회차 사이 대기(초)
 TIMEOUT=2400            # 회차당 제한시간(초). 0.9도 전체 스캔이 약 14분
-DAEMON=./adts_daemon
+# 데몬 실행파일. 스크립트 위치(<repo>/daemon/tools/)에서 역산해 찾는다 —
+# 예전에는 ./adts_daemon 고정이라 레포 안에서 돌리면 못 찾았고, 실기에서는
+# 절대경로를 손으로 박아 쓰다가 pull 마다 충돌이 났다. -d 로 덮어쓸 수 있다.
+_SB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAEMON=""
+for _c in "$_SB_DIR/../build/adts_daemon" "$_SB_DIR/../adts_daemon" \
+          "./adts_daemon" "/opt/adts/adts_daemon"; do
+    [ -x "$_c" ] && { DAEMON="$_c"; break; }
+done
+[ -n "$DAEMON" ] || DAEMON=./adts_daemon      # 못 찾으면 아래에서 에러로 알린다
 OUTDIR=""
 KEEPGOING=0             # 1 = 실패해도 계속
 
 # 데몬에 넘길 스캔 인자. -- 뒤에 주면 통째로 교체된다.
-SCAN_ARGS=(--scan 0 1791 -900 900 9)
+SCAN_ARGS=(--scan 0 1791 -900 900 9 --height 1805)
 
 usage() {
     cat <<EOF
@@ -92,7 +101,7 @@ if command -v timeout  >/dev/null; then TO=(timeout  --signal=INT --kill-after=2
 elif command -v gtimeout >/dev/null; then TO=(gtimeout --signal=INT --kill-after=20 "$TIMEOUT")
 else
     TO=()
-    echo "⚠ timeout 명령이 없다 — 회차 제한시간 없이 진행한다" >&2
+    echo "주의: timeout 명령이 없다 — 회차 제한시간 없이 진행한다" >&2
 fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -129,7 +138,7 @@ for ((i = 1; i <= COUNT; i++)); do
     echo "── [$i/$COUNT] 시작  $(date '+%H:%M:%S')  → $LOG"
 
     T0=$(date +%s)
-    # ⚠️ ${TO[@]+...} 형태를 쓴다. set -u 아래에서 **빈 배열을 "${TO[@]}" 로
+    # 주의: ${TO[@]+...} 형태를 쓴다. set -u 아래에서 **빈 배열을 "${TO[@]}" 로
     #   펴면 bash 3.2(macOS 기본)가 unbound variable 로 죽는다.** 4.4+ 는
     #   괜찮지만 여기서 갈리면 원인을 찾기 어렵다.
     ${TO[@]+"${TO[@]}"} "$DAEMON" "${SCAN_ARGS[@]}" 2>&1 | tee "$LOG"
@@ -141,25 +150,25 @@ for ((i = 1; i <= COUNT; i++)); do
     PCD=$(grep -o '[^ ]*\.pcd' "$LOG" | tail -1)
     CELLS=$(grep -o '유효 [0-9]*셀' "$LOG" | tail -1 | tr -dc '0-9')
 
-    # ⚠️ ABORT 를 먼저 본다. 데몬은 SIGINT 를 받아도 **정상 종료(rc=0)** 하므로,
+    # 주의: ABORT 를 먼저 본다. 데몬은 SIGINT 를 받아도 **정상 종료(rc=0)** 하므로,
     #   Ctrl-C 로 끊긴 회차가 rc 만 보면 "완료" 로 집계된다(유효셀 0 짜리 성공).
     if [ "$ABORT" -eq 1 ]; then
         NG=$((NG + 1))
-        echo "── [$i/$COUNT] ⛔ 중단됨 (${ELAPSED}s) — 산출물 없음"
+        echo "── [$i/$COUNT]  중단됨 (${ELAPSED}s) — 산출물 없음"
         RESULTS+=("$i aborted ${ELAPSED} 0 -")
         break
     fi
 
     case "$RC" in
         0)  OK=$((OK + 1))
-            echo "── [$i/$COUNT] ✅ 완료 (${ELAPSED}s)  유효 ${CELLS:-?}셀  ${PCD:-}"
+            echo "── [$i/$COUNT]  완료 (${ELAPSED}s)  유효 ${CELLS:-?}셀  ${PCD:-}"
             RESULTS+=("$i ok ${ELAPSED} ${CELLS:-0} ${PCD:-}") ;;
         124|137)
             NG=$((NG + 1))
-            echo "── [$i/$COUNT] ⏱  제한시간 ${TIMEOUT}s 초과 — 강제 종료"
+            echo "── [$i/$COUNT]   제한시간 ${TIMEOUT}s 초과 — 강제 종료"
             RESULTS+=("$i timeout ${ELAPSED} 0 -") ;;
         *)  NG=$((NG + 1))
-            echo "── [$i/$COUNT] ❌ 실패 (rc=$RC, ${ELAPSED}s) — $LOG 확인"
+            echo "── [$i/$COUNT]  실패 (rc=$RC, ${ELAPSED}s) — $LOG 확인"
             RESULTS+=("$i fail(rc=$RC) ${ELAPSED} 0 -") ;;
     esac
 
@@ -170,7 +179,7 @@ for ((i = 1; i <= COUNT; i++)); do
 
     # 마지막 회차 뒤에는 기다리지 않는다.
     if [ "$i" -lt "$COUNT" ] && [ "$ABORT" -eq 0 ]; then
-        # ⚠️ 데몬은 SCAN_DONE 을 받은 뒤 곧바로 끝나지만 STM32 는 그때부터
+        # 주의: 데몬은 SCAN_DONE 을 받은 뒤 곧바로 끝나지만 STM32 는 그때부터
         #   양축을 홈 자세로 되돌린다. 그게 끝나기 전에 다음 회차가 시작되면
         #   새 스캔이 이동 중인 축을 덮어써서 첫 줄이 어긋난다.
         echo "   ${INTERVAL}s 대기 (STM32 파킹 완료 여유)"
