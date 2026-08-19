@@ -249,7 +249,7 @@ static bool issue_cert(const char *cn, char **ca_pem, char **crt_pem, char **key
     (void)snprintf(ca_path,    sizeof ca_path,    "%s/ca.crt",       g_cert_dir);
 
     /* 재발급(로그아웃 후 재등록 등)이면 기존 파일을 지우고 새로 만든다.
-     * ⚠️ 이전 인증서는 파일을 지운다고 폐기되지 않는다 — 암호학적으로 여전히
+     * 주의: 이전 인증서는 파일을 지운다고 폐기되지 않는다 — 암호학적으로 여전히
      *    유효하다. 실제로 무효화하려면 브로커에 CRL 을 걸어야 한다. */
     if (access(crt_path, F_OK) == 0) {
         logmsg("WARN", "CN=%s 재발급 — 이전 인증서는 CRL 없이는 여전히 유효합니다", cn);

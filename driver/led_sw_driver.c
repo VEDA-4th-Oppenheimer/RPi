@@ -13,7 +13,7 @@
  *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
  *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
  *
- *  ⚠️ BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
+ *  주의: BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
  *    이 주석이 아래 모듈 파라미터 기본값과 어긋난 적이 있다(초록·노랑·빨강이
  *    전부 다르게 적혀 있었다). 배선하는 사람이 여기만 보고 꽂으면 LED 자리가
  *    바뀌므로, 핀을 옮기면 **이 표 / 모듈 파라미터 / 오버레이 / led_sw_test
@@ -365,14 +365,14 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
 
   ret = gpio_request_one(pin, flags, label);
 
-  /* ⚠️ -EPROBE_DEFER 는 여기서 되돌리지 않는다.
+  /* 주의: -EPROBE_DEFER 는 여기서 되돌리지 않는다.
    *
    *   그 코드의 뜻은 "내가 기대는 리소스(gpiochip 등)가 아직 준비되지
    *   않았으니 **나중에 다시 불러 달라**" 이다. 즉시 재요청해도 상황이
    *   바뀔 리가 없고, 오히려 커널이 준비된 뒤 probe 를 다시 불러줄
    *   기회를 없애 deferral 자체를 무력화한다. 그대로 올려보낸다.
    *
-   * ⚠️ -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
+   * 주의: -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
    *   필요했던 우회이고, 재현할 보드 없이 빼면 probe 가 실패할 수 있다.
    *   다만 이건 **남이 쥔 GPIO 를 강제로 뺏는** 동작이라 안전하지 않다.
    *   원인 후보:
@@ -400,7 +400,7 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
  * 여기에 misc_deregister 를 넣으면 실패 경로가 등록도 안 된 걸 해제하려 들고,
  * 빼면 remove 경로에서 문자 디바이스가 남는다. 그래서 **호출자가** 책임진다.
  *
- * ⚠️ 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
+ * 주의: 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
  *   /dev/led_sw 가 등록된 채라 fops 가 사라진 모듈을 가리킨다. 누가 열면
  *   use-after-free 다. 재적재 시 같은 이름으로 misc_register 가 또 불려
  *   실패할 수도 있다. */
@@ -504,6 +504,17 @@ static int led_sw_probe(struct platform_device *pdev) {
 
 		g_led_sw->pwm_buzzer = NULL;
 		if (perr == -EPROBE_DEFER) {
+			/* 주의: 전역 포인터를 반드시 비우고 나간다. devm_kzalloc 으로 받은
+			 *   메모리는 probe 가 실패하면 **커널이 회수한다**. 포인터만
+			 *   남겨두면 재probe 가 맨 위의 "이미 초기화됨" 검사에 걸려
+			 *   아무것도 안 하고 0 을 반환하고, 이후 접근은 해제된 메모리를
+			 *   건드린다(use-after-free).
+			 *
+			 *   led_sw_teardown() 을 부르지 않는 이유: 이 지점까지 잡은
+			 *   자원이 없다. GPIO 요청·타이머·kthread·misc 등록이 전부
+			 *   아래에 있어서, teardown 을 부르면 초기화된 적 없는 타이머를
+			 *   del_timer_sync 하고 요청한 적 없는 핀에 값을 쓰게 된다. */
+			g_led_sw = NULL;
 			return perr;
 		}
 		pr_info("led_sw: hardware PWM 없음 (%d) — GPIO 폴백\n", perr);

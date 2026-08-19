@@ -8,7 +8,7 @@ fake_camera.py — 카메라 수신측(lidar_json_receiver) 대역
   사용:
       python3 fake_camera.py --certs /etc/adts/certs [--port 2222] [--once]
 
-  ⚠️ 이 스크립트는 **카메라 인증서(adts-camera.crt/.key)** 로 서버를 연다.
+  주의: 이 스크립트는 **카메라 인증서(adts-camera.crt/.key)** 로 서버를 연다.
     발급:  sudo bash broker/gen-certs.sh --server adts-camera
 
   수신측(CV5 앱)이 갖춰야 할 것을 이 파일이 그대로 보여준다:
@@ -40,11 +40,11 @@ def serve_one(tls_sock, save):
     cn = dict(x[0] for x in peer["subject"]).get("commonName", "?")
     print(f"  클라이언트 CN={cn}  cipher={tls_sock.cipher()[0]}", flush=True)
 
-    # ⚠️ 신원 확인은 여기서 한 번 더 한다. 인증서가 우리 CA 로 서명됐다는 것과
+    # 주의: 신원 확인은 여기서 한 번 더 한다. 인증서가 우리 CA 로 서명됐다는 것과
     #   그것이 **데몬**이라는 것은 다른 얘기다. 같은 CA 가 Qt 콘솔 인증서도
     #   발급했으므로, CN 을 안 보면 Qt 인증서로도 파일을 밀어넣을 수 있다.
     if cn != "adts-daemon":
-        print(f"  ✗ 거부 — 기대한 CN 은 adts-daemon", flush=True)
+        print(f"   거부 — 기대한 CN 은 adts-daemon", flush=True)
         tls_sock.sendall(b'{"result":"error","reason":"unauthorized"}\n')
         return
 
@@ -65,7 +65,7 @@ def serve_one(tls_sock, save):
     if out:
         out.close()
 
-    print(f"  ✓ {name}  {file_len:,} B  sha256={digest.hexdigest()[:16]}"
+    print(f"   {name}  {file_len:,} B  sha256={digest.hexdigest()[:16]}"
           + ("  (저장함)" if save else ""), flush=True)
     tls_sock.sendall(b'{"result":"ok","file":"' + name.encode() + b'"}\n')
 
@@ -84,7 +84,7 @@ def main():
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(f"{a.certs}/{a.name}.crt", f"{a.certs}/{a.name}.key")
     ctx.load_verify_locations(f"{a.certs}/ca.crt")
-    ctx.verify_mode = ssl.CERT_REQUIRED          # ★ mTLS
+    ctx.verify_mode = ssl.CERT_REQUIRED          # 핵심: mTLS
 
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -101,9 +101,9 @@ def main():
                 serve_one(tls, a.save)
         except ssl.SSLError as e:
             # 여기로 오는 대부분은 클라이언트 인증서 문제다.
-            print(f"  ✗ TLS 실패: {e}", flush=True)
+            print(f"   TLS 실패: {e}", flush=True)
         except (EOFError, OSError) as e:
-            print(f"  ✗ 전송 실패: {e}", flush=True)
+            print(f"   전송 실패: {e}", flush=True)
         finally:
             raw.close()
         if a.once:

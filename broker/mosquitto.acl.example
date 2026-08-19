@@ -3,12 +3,12 @@
 #  배치: sudo cp mosquitto.acl.example /etc/mosquitto/conf.d/adts.acl
 #  ※ use_identity_as_username true 라서 user = 인증서 CN
 #
-#  ★ mosquitto 의 `user <이름>` 은 **정확 매칭**이다. 와일드카드나 접두사 매칭이
+#  핵심: mosquitto 의 `user <이름>` 은 **정확 매칭**이다. 와일드카드나 접두사 매칭이
 #    없다. 그래서 사람마다 다른 CN 으로 인증서를 발급하면(발급 서비스 /enroll)
 #    그 CN 블록을 여기에 하나씩 추가해야 한다. 빠뜨리면 TLS 핸드셰이크는
 #    성공하는데 구독·발행만 조용히 막혀서 원인을 찾기 어렵다.
 #
-#  ★ 이 파일을 고친 뒤에는 반드시:  sudo systemctl reload mosquitto
+#  핵심: 이 파일을 고친 뒤에는 반드시:  sudo systemctl reload mosquitto
 #    (재시작이 아니라 reload — SIGHUP 으로 ACL 만 다시 읽는다)
 # ============================================================================
 

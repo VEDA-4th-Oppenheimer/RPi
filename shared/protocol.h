@@ -6,10 +6,10 @@
  *    2) STM32 펌웨어                        - 프레임 파싱/조립
  *    3) RPi 유저 데몬                       - ioctl 호출 + read() 스캔 스트림
  *
- *  ★ 단일 진실 소스. 수정 시 3자 모두 재빌드하고 VERSION을 올린다.
- *  ★ v4: 안티드론 조준(SET_TARGET/ALIGNED/MODE/DISTANCE) 제거,
+ *  핵심: 단일 진실 소스. 수정 시 3자 모두 재빌드하고 VERSION을 올린다.
+ *  핵심: v4: 안티드론 조준(SET_TARGET/ALIGNED/MODE/DISTANCE) 제거,
  *        스캔 스트림(SCAN_START/STOP/DATA/DONE) 추가. tilt 부호각 확장.
- *  ★ v5: ① 스캔 점에 라이다 원시 품질 필드 추가 (6B -> 18B)
+ *  핵심: v5: ① 스캔 점에 라이다 원시 품질 필드 추가 (6B -> 18B)
  *        ② CMD_HOMED 에 엔코더 원본값 payload 추가 (2축 HOME 확립용)
  *
  *  담당: 이현우 (RPi↔STM32 프로토콜 관리)
@@ -46,7 +46,7 @@
 /* 1. 프레임 구조 상수 */
 #define PROTO_SOF            0xAAu
 /* v5 에서 proto_scan_point 가 18B 가 되어 16 -> 24 로 확장(여유 포함).
- * ⚠️ 이 값을 줄이면 스캔 점 프레임이 CWE-120 경계검사에서 조용히 버려진다. */
+ * 주의: 이 값을 줄이면 스캔 점 프레임이 CWE-120 경계검사에서 조용히 버려진다. */
 #define PROTO_MAX_PAYLOAD    24u
 #define PROTO_HEADER_LEN     3u
 #define PROTO_CRC_LEN        2u
@@ -87,16 +87,16 @@ enum proto_err_code {
  *   - tilt (틸트 고각): -900 ~ +900 (부호).
  *   - 홈(CMD_HOMED) 전 SCAN_START 은 STM이 무시하고 ERR_NOT_HOMED 응답.
  *
- *   ★ 이 프로토콜이 나르는 각도는 **기구(mechanism) 각도**다.
+ *   핵심: 이 프로토콜이 나르는 각도는 **기구(mechanism) 각도**다.
  *     천장 마운트 2축 구성에서 축 역할은 다음과 같다:
  *       - 틸트 = 빠른 축. 한 스윕이 -90 -> +90 (한쪽 벽 -> 바닥 -> 반대쪽 벽).
  *       - 팬   = 느린 축. 1도씩 180회. 스윕 동안 정지.
  *
- *     ▸ 두 축 모두 각도원은 **스텝카운트**다 (라이다 ISR 에서 원자적 래치).
+ *      두 축 모두 각도원은 **스텝카운트**다 (라이다 ISR 에서 원자적 래치).
  *       엔코더(MT6701) 읽기를 샘플마다 끼우지 않는 이유: I2C 읽기가 끝난
  *       시각과 라이다 샘플 시각이 달라 오히려 동기 오차가 생긴다.
  *
- *     ▸ 엔코더는 세 곳에서만 쓴다:
+ *      엔코더는 세 곳에서만 쓴다:
  *         ① 홈 확립 — 절대 엔코더라 구동 없이 읽기 1회로 끝난다.
  *                      리밋스위치는 쓰지 않는다(양축 모두 없음).
  *         ② 틸트 스윕 끝점(±90) 대조 — 방향 전환이 탈조가 나는 자리라
@@ -106,11 +106,11 @@ enum proto_err_code {
  *                      정지 중이라 읽기 비용이 사실상 0 이라서 감시만 둔다.
  *       ②③ 에서 오차가 크면 ERR_STALL 을 올린다.
  *
- *     ▸ 영점 상수(PAN_ZERO_RAW / TILT_ZERO_RAW)는 조립 후 1회 실측해
+ *      영점 상수(PAN_ZERO_RAW / TILT_ZERO_RAW)는 조립 후 1회 실측해
  *       펌웨어에 넣는다. 상수가 틀려도 CMD_HOMED 가 엔코더 raw 를 함께
  *       올리므로 이미 찍은 스캔의 각도를 오프라인에서 재계산할 수 있다.
  *
- *   ⚠️ 계약 좌표계(lidar_scan: +x right, +y down, +z forward)로의 변환은
+ *   주의: 계약 좌표계(lidar_scan: +x right, +y down, +z forward)로의 변환은
  *     **RPi 데몬 담당**이다. 틸트 스윕이 nadir 를 지나므로 기구 각도와
  *     계약 각도가 1:1 이 아니다:
  *         스윕 전반부(벽->바닥)   -> 계약 pan = p,      tilt =   0 -> -90
@@ -154,15 +154,15 @@ struct proto_scan_start {
 
 /* CMD_SCAN_DATA payload : 스캔 점 하나 (18B, v5)
  *
- *  ⚠️ signal_strength / range_precision / dis_status 는 **원본 그대로** 전달한다.
+ *  주의: signal_strength / range_precision / dis_status 는 **원본 그대로** 전달한다.
  *    정규화·판정은 상위(데몬/캘리브)에서. 특히 signal_strength 는 calibrated
  *    reflectivity 가 아니므로 재질 판별에 단독 사용 금지.
  *
- *  ⚠️ device_time_ms(라이다 시계) 와 stm_ts_ms(STM32 시계) 는 서로 다른
+ *  주의: device_time_ms(라이다 시계) 와 stm_ts_ms(STM32 시계) 는 서로 다른
  *    clock domain 이다. 섞어 쓰지 말 것. 계약 JSON 의 timestamp_ns 는
  *    데몬이 자기 단조시계로 채운다(scan.started/ended 와 동일 시계).
  *
- *  ⚠️ 엔코더 원본값은 여기 없다. 엔코더는 HOME(proto_homed)과 줄 경계
+ *  주의: 엔코더 원본값은 여기 없다. 엔코더는 HOME(proto_homed)과 줄 경계
  *    탈조 검증에만 쓰고, 스캔 중에는 I2C 를 읽지 않는다(ISR 블로킹 금지). */
 struct proto_scan_point {
     proto_s16 pan_ddeg;          /* 기구 방위 (0.1도)                        */
@@ -232,7 +232,7 @@ PROTO_PACKED_END
   #define TURRET_SCAN_START  _IOW(TURRET_IOC_MAGIC, 2, struct proto_scan_start)
   #define TURRET_SCAN_STOP   _IO (TURRET_IOC_MAGIC, 3)
   #define TURRET_DISARM      _IO (TURRET_IOC_MAGIC, 4)
-  /* ⚠️ v5 에서 turret_link_state 가 커져 _IOR 인코딩(크기 필드)이 바뀌었다.
+  /* 주의: v5 에서 turret_link_state 가 커져 _IOR 인코딩(크기 필드)이 바뀌었다.
    *    구버전 유저스페이스가 신버전 드라이버를 때리면 -ENOTTY 로 즉시 실패한다
    *    (조용한 구조체 오해석보다 안전). 드라이버·데몬은 같이 재빌드할 것. */
   #define TURRET_GET_STATE   _IOR(TURRET_IOC_MAGIC, 5, struct turret_link_state)

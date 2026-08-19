@@ -2,7 +2,7 @@
 # ============================================================================
 #  gen-certs.sh — MQTT mTLS 인증서 발급 (브로커 호스트 = RPi 에서 실행)
 # ----------------------------------------------------------------------------
-#  ★ 반드시 RPi 에서 실행한다. CA 개인키(ca.key)는 이 장비 밖으로 나가지 않는다.
+#  핵심: 반드시 RPi 에서 실행한다. CA 개인키(ca.key)는 이 장비 밖으로 나가지 않는다.
 #    클라이언트에게는 인증서와 그 클라이언트의 키만 내보낸다.
 #
 #  사용 ①  전체 발급 (최초 1회 — CA·브로커·데몬·기본 Qt 인증서를 한꺼번에)
@@ -14,7 +14,7 @@
 #      예)  sudo bash gen-certs.sh --client qt-console-youngbin /etc/adts/certs
 #
 #      발급 서비스(/enroll)가 사람마다 다른 CN 으로 인증서를 내줄 때 쓴다.
-#      ★ 발급 후 반드시 /etc/mosquitto/conf.d/adts.acl 에 그 CN 블록을 추가하고
+#      핵심: 발급 후 반드시 /etc/mosquitto/conf.d/adts.acl 에 그 CN 블록을 추가하고
 #        브로커를 reload 해야 한다. mosquitto ACL 은 `user <CN>` **정확 매칭**이라
 #        와일드카드가 없어서, 빠뜨리면 인증서는 정상인데 구독·발행이 조용히 막힌다.
 #        (broker/mosquitto.acl.example 하단 참고)
@@ -37,7 +37,7 @@
 #  만들어지는 것 (②):
 #      <CN>.crt / <CN>.key / <CN>-trad.key
 #
-#  ⚠️ Qt(QSslKey)는 OpenSSL 3.x 기본인 PKCS#8 키를 QSsl::Rsa 로 읽으면
+#  주의: Qt(QSslKey)는 OpenSSL 3.x 기본인 PKCS#8 키를 QSsl::Rsa 로 읽으면
 #    null 을 반환하고 **조용히** 실패한다. 그래서 변환본을 같이 만든다.
 # ============================================================================
 set -euo pipefail
@@ -83,7 +83,7 @@ if [ "${1:-}" = "--new-token" ]; then
     # 같은 라벨의 미사용 토큰이 이미 있으면 알려준다. 여러 개 두는 것 자체는
     # 문제가 없지만(먼저 쓴 것만 유효) 관리자가 헷갈리기 쉽다.
     if grep -qE "^[^#[:space:]]+[[:space:]]+${LABEL}$" "$TOKEN_FILE" 2>/dev/null; then
-        echo "⚠️  '${LABEL}' 앞으로 아직 쓰지 않은 토큰이 이미 있습니다." >&2
+        echo "주의: '${LABEL}' 앞으로 아직 쓰지 않은 토큰이 이미 있습니다." >&2
         echo "    회수하려면: bash gen-certs.sh --revoke ${LABEL}" >&2
     fi
 
@@ -169,7 +169,7 @@ fi
 #    --client 는 extendedKeyUsage=clientAuth 만 넣는다. 그 인증서를 서버로 세우면
 #    접속하는 쪽이 용도 불일치로 거부한다. 서버는 serverAuth + SAN 이 필요하다.
 #
-#  ★ SAN 에 IP 를 넣지 않는다. 카메라도 RPi 도 DHCP 라 주소가 계속 바뀌는데,
+#  핵심: SAN 에 IP 를 넣지 않는다. 카메라도 RPi 도 DHCP 라 주소가 계속 바뀌는데,
 #    IP SAN 을 박으면 주소가 바뀔 때마다 인증서를 다시 발급해야 한다. 대신
 #    **고정된 이름**을 넣고 접속하는 쪽이 그 이름으로 검증한다(SSL_set1_host).
 #    DNS 에 실제로 등록될 필요는 없다 — 신원 라벨로만 쓴다.
@@ -224,7 +224,7 @@ EOF
   $CN.crt   $CN.key   ca.crt
 
   ca.crt 는 카메라가 **데몬의 클라이언트 인증서를 검증**하는 데 쓴다(mTLS).
-  ⚠️ ca.key 는 절대 넘기지 말 것.
+  주의: ca.key 는 절대 넘기지 말 것.
 
 데몬 쪽은 발급이 필요 없다 — daemon.crt/daemon.key 를 이미 갖고 있다.
 데몬이 검증할 이름은 위 SAN 의 DNS 값이다:
@@ -379,8 +379,8 @@ cat <<EOF
     mkdir -p ~/adts-certs
     scp pi@${HOST_IP}:$(pwd)/{ca.crt,qt-console.crt,qt-console-trad.key} ~/adts-certs/
 
-⚠️ ca.key 는 절대 내보내지 말 것. 이 장비에만 있어야 한다.
-⚠️ 유효기간 ${DAYS}일. RPi 는 RTC 가 없어 인터넷 없이 부팅하면 시계가
+주의: ca.key 는 절대 내보내지 말 것. 이 장비에만 있어야 한다.
+주의: 유효기간 ${DAYS}일. RPi 는 RTC 가 없어 인터넷 없이 부팅하면 시계가
    틀어져 "not yet valid" 로 거부될 수 있다 (fake-hwclock 확인).
 ──────────────────────────────────────────────────────────────
 EOF

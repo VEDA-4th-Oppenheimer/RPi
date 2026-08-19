@@ -14,7 +14,7 @@
  *    → 응답 JSON 한 줄:  {"result":"ok", ...}  또는  {"result":"error", ...}
  *
  *  ============================================================================
- *  ★ 주소와 신원을 분리한다 — 이 모듈의 핵심 설계
+ *  핵심: 주소와 신원을 분리한다 — 이 모듈의 핵심 설계
  *  ============================================================================
  *  카메라도 RPi 도 DHCP 라 IP 가 계속 바뀌고, 둘이 서로 다른 서브넷에 있어
  *  라우터를 거친다. 그래서 mDNS·브로드캐스트 같은 링크로컬 탐색이 전부 안 되고,
@@ -27,11 +27,11 @@
  *    · 신원 : 인증서 SAN 의 고정된 이름(기본 adts-camera)을 SSL_set1_host 로
  *             검증한다. IP 가 매일 바뀌어도 인증서는 다시 발급할 필요가 없다.
  *
- *  ⚠️ 이 분리가 없으면 mTLS 를 붙여도 실익이 없다. IP 로만 상대를 특정하면
+ *  주의: 이 분리가 없으면 mTLS 를 붙여도 실익이 없다. IP 로만 상대를 특정하면
  *    DHCP 가 그 주소를 다른 장비에 재할당했을 때 "주소는 맞는데 다른 놈"이
  *    되는데, 그게 정확히 지금 상황에서 일어날 수 있는 일이다.
  *
- *  ⚠️ 평문 폴백은 없다. TLS 를 준비 못 하면 업로드를 **안 한다**. 보안 기능이
+ *  주의: 평문 폴백은 없다. TLS 를 준비 못 하면 업로드를 **안 한다**. 보안 기능이
  *    조용히 꺼진 채로 도는 것이 실패보다 나쁘다 — 파일은 로컬에 남아 있으므로
  *    잃는 것은 없고, 나중에 손으로 올릴 수 있다.
  *
@@ -47,7 +47,7 @@
  *    scan_batch.sh 가 --once 를 반복하므로 매 회차가 그렇게 된다. 동기가
  *    단순할 뿐 아니라 이 경우에 **더 옳다**.
  *
- *  ⚠️ 대신 세 가지를 반드시 지킨다:
+ *  주의: 대신 세 가지를 반드시 지킨다:
  *    ① 소켓 타임아웃 — 카메라가 안 받으면 쓰기가 영원히 안 돌아온다.
  *    ② 끝나면 core_hb_reprime() — 안 하면 블로킹한 시간을 통신 두절로
  *       오판해 매번 DISARM 이 걸린다(그쪽 주석 참조).
@@ -78,7 +78,7 @@
 /* ── 설정 ────────────────────────────────────────────────────────────────────
  *  우선순위:  설정 파일  >  환경변수  >  내장 기본값
  *
- *  ⚠️ 파일이 환경변수를 **이긴다**. 반대로 두면 systemd 유닛의 Environment=
+ *  주의: 파일이 환경변수를 **이긴다**. 반대로 두면 systemd 유닛의 Environment=
  *    가 항상 이겨서, 파일을 고쳐도 아무 일이 안 일어난다("고쳤는데 왜 그대로지").
  *    환경변수는 파일이 없을 때의 기본값 역할만 한다.
  */
@@ -103,7 +103,7 @@
 #define DEF_CERT      "/etc/adts/certs/daemon.crt"
 #define DEF_KEY       "/etc/adts/certs/daemon.key"
 
-/* ⚠️ 무선 기준. JSON 이 20~25MB 인데 Wi-Fi 실효 대역이 흔들리면 수십 초가
+/* 주의: 무선 기준. JSON 이 20~25MB 인데 Wi-Fi 실효 대역이 흔들리면 수십 초가
  *   걸린다. 이 값은 **한 번의 읽기/쓰기가 멈춰 있을 수 있는 한도**이지 전체
  *   전송 시간이 아니다(진행 중이면 타이머가 갱신된다). 그래도 넉넉히 둔다. */
 #define DEF_TIMEOUT_S  60
@@ -127,7 +127,14 @@ static char     s_key[PATH_MAX_LEN];
 static int      s_port;
 static int      s_timeout_s;
 static bool     s_disabled;
-static uint32_t s_last_result_seq;   /* 같은 스캔을 두 번 올리지 않기 위한 표식 */
+/* 같은 스캔을 두 번 올리지 않기 위한 표식 = **직전에 올린 JSON 경로**.
+ *
+ * 주의: 예전엔 point_count 를 썼는데 그게 틀렸다. 고정 격자 스캔은 유효 셀 수가
+ *   회차마다 거의 같으므로, 두 번째 스캔부터 "이미 올렸다" 로 오인해 업로드가
+ *   조용히 사라졌다(로그도 안 남는다). 파일명에는 시작 시각이 들어 있어 회차
+ *   구분이 실제로 되고, 재전송을 막아야 할 대상 자체가 "이 파일" 이라 의미도
+ *   정확하다. */
+static char s_last_uploaded[PATH_MAX_LEN];
 
 #ifndef ADTS_NO_TLS
 static SSL_CTX *s_tls;
@@ -188,7 +195,7 @@ static bool name_is_acceptable(const char *n)
  *    disable   = 0
  *    ca / cert / key = <경로>
  *
- *  ⚠️ JSON 이 아니라 key = value 다. cJSON 은 이 빌드에서 **선택 의존성**이라
+ *  주의: JSON 이 아니라 key = value 다. cJSON 은 이 빌드에서 **선택 의존성**이라
  *    (맥 크로스 sysroot 에 없다) 설정 읽기가 거기 묶이면 안 된다. 그리고
  *    현장에서 vi 로 한 줄 고치는 파일이라 콤마·따옴표가 없는 편이 안전하다.
  * ------------------------------------------------------------------------- */
@@ -340,7 +347,7 @@ static bool tls_ctx_ready(char *reason, size_t reason_len)
         SSL_CTX_free(c);
         return false;
     }
-    /* ⚠️ 키는 0640 root:adts 다. 데몬이 그 그룹에 없으면 여기서 걸린다 —
+    /* 주의: 키는 0640 root:adts 다. 데몬이 그 그룹에 없으면 여기서 걸린다 —
      *   "권한" 이라고 분명히 말해주지 않으면 원인을 찾는 데 한참 걸린다. */
     if (SSL_CTX_use_PrivateKey_file(c, s_key, SSL_FILETYPE_PEM) != 1) {
         (void)snprintf(reason, reason_len, "키 읽기 실패(권한 확인): %.180s", s_key);
@@ -394,7 +401,7 @@ static int connect_camera(void)
         struct timeval tv;
         memset(&tv, 0, sizeof(tv));
         tv.tv_sec = s_timeout_s;
-        /* ⚠️ 이게 없으면 카메라가 응답을 멈췄을 때 데몬이 영원히 멈춘다.
+        /* 주의: 이게 없으면 카메라가 응답을 멈췄을 때 데몬이 영원히 멈춘다.
          *   scan_batch.sh 의 회차 제한시간에 걸릴 때까지 아무 일도 안 한다. */
         (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -423,7 +430,7 @@ static bool ssl_send_all(SSL *ssl, const void *buf, size_t len)
 
 /* 핸드셰이크까지 끝난 SSL* 를 돌려준다. 실패 시 NULL + reason.
  *
- * ★ 여기가 이 모듈의 요점이다. connect 는 s_host(그때그때의 IP)로 하지만
+ * 핵심: 여기가 이 모듈의 요점이다. connect 는 s_host(그때그때의 IP)로 하지만
  *   검증은 s_name(고정된 이름)으로 한다. */
 static SSL *tls_handshake(int fd, char *reason, size_t reason_len)
 {
@@ -453,7 +460,7 @@ static SSL *tls_handshake(int fd, char *reason, size_t reason_len)
     }
 
     if (SSL_connect(ssl) != 1) {
-        /* ⚠️ 접속 실패와 신원 불일치를 반드시 구분해서 알린다. 전자는
+        /* 주의: 접속 실패와 신원 불일치를 반드시 구분해서 알린다. 전자는
          *   "주소가 틀렸다"(설정 파일을 고쳐라), 후자는 "다른 장비다"
          *   (DHCP 가 그 IP 를 남에게 줬거나 인증서가 안 맞다)라서 대응이
          *   완전히 다르다. 뭉뚱그리면 엉뚱한 데를 고치게 된다. */
@@ -480,7 +487,7 @@ static SSL *tls_handshake(int fd, char *reason, size_t reason_len)
  *   UP_RETRY  -1   일시적일 수 있다 — 다시 해볼 가치가 있다
  *   UP_FATAL  -2   다시 해도 같다 — 즉시 그만두고 이 사유를 보고한다
  *
- * ⚠️ 이 구분이 없으면 **엉뚱한 사유가 보고된다.** 신원 불일치로 실패한 뒤
+ * 주의: 이 구분이 없으면 **엉뚱한 사유가 보고된다.** 신원 불일치로 실패한 뒤
  *   2초 있다 또 붙으면 상대가 그새 사라져 "Connection refused" 가 나고,
  *   마지막 사유만 남으니 Qt 에는 "접속 실패" 로 뜬다. 실제로는 인증서
  *   문제인데 사람은 주소를 고치러 간다(시험에서 그대로 재현됐다).
@@ -656,7 +663,7 @@ static int cam_init(struct shared_ctx *ctx)
     copy_str(s_conf, sizeof(s_conf), env_or(ENV_CONF, DEF_CONF));
     (void)load_config();
 
-    /* ⚠️ SIGPIPE 를 끈다. 예전엔 send(MSG_NOSIGNAL) 로 막았지만 OpenSSL 은
+    /* 주의: SIGPIPE 를 끈다. 예전엔 send(MSG_NOSIGNAL) 로 막았지만 OpenSSL 은
      *   내부에서 write(2) 를 부르므로 그 플래그를 넘길 방법이 없다. 상대가
      *   먼저 끊은 소켓에 쓰면 **데몬이 그 자리에서 죽는다** — 스캔 산출물을
      *   들고 있는 상태라 절대 죽으면 안 된다. 프로세스 전역 설정이지만
@@ -666,7 +673,7 @@ static int cam_init(struct shared_ctx *ctx)
 #ifdef ADTS_NO_TLS
     /* 평문으로 되돌리지 않는다(파일 머리말 참조). 여기서 끝낸다. */
     (void)fprintf(stderr,
-                  "[camera  ] ⚠ OpenSSL 없이 빌드됨 — 업로드 비활성\n");
+                  "[camera  ] 주의: OpenSSL 없이 빌드됨 — 업로드 비활성\n");
     s_disabled = true;
     return 0;
 #else
@@ -675,7 +682,7 @@ static int cam_init(struct shared_ctx *ctx)
         if (!tls_ctx_ready(reason, sizeof(reason))) {
             /* 여기서 실패해도 데몬은 계속 뜬다. 인증서를 나중에 설치하고
              * 재시작 없이 이어갈 수 있게, 업로드 때 다시 시도한다. */
-            (void)fprintf(stderr, "[camera  ] ⚠ TLS 준비 실패: %s\n", reason);
+            (void)fprintf(stderr, "[camera  ] 주의: TLS 준비 실패: %s\n", reason);
         }
     }
 #endif
@@ -701,14 +708,15 @@ static void cam_on_state(struct shared_ctx *ctx,
     if (new_st != ST_EXPORT) {
         return;
     }
-    /* ⚠️ result.valid 를 반드시 본다. 산출이 실패한 스캔(권한·디스크)에서도
+    /* 주의: result.valid 를 반드시 본다. 산출이 실패한 스캔(권한·디스크)에서도
      *   EXPORT 전이는 일어나므로, 안 보면 없는 파일을 올리려 든다. */
     if ((ctx->result.valid == 0u) || (ctx->result.json_path[0] == '\0')) {
         core_log(ctx->core, "CAM", "산출물이 없어 업로드를 건너뛴다");
         return;
     }
-    /* 같은 스캔을 두 번 올리지 않는다 — EXPORT 재진입이 생겨도 안전하게. */
-    if (ctx->result.point_count == s_last_result_seq) {
+    /* 같은 파일을 두 번 올리지 않는다 — EXPORT 재진입이 생겨도 안전하게. */
+    if (strcmp(ctx->result.json_path, s_last_uploaded) == 0) {
+        core_log(ctx->core, "CAM", "이미 올린 파일이라 건너뛴다");
         return;
     }
 
@@ -716,7 +724,7 @@ static void cam_on_state(struct shared_ctx *ctx,
     bool ok = false;
 
     for (uint32_t attempt = 1u; attempt <= MAX_ATTEMPTS; attempt++) {
-        /* ★ 시도할 때마다 설정을 다시 읽는다. 데몬을 재시작하지 않아도 되고,
+        /* 핵심: 시도할 때마다 설정을 다시 읽는다. 데몬을 재시작하지 않아도 되고,
          *   재시도 사이(최대 수십 초)에 사람이 주소를 고치면 바로 반영된다.
          *   같은 죽은 주소를 세 번 두드리는 것보다 훨씬 낫다. */
         if (load_config() && (attempt > 1u)) {
@@ -750,13 +758,13 @@ static void cam_on_state(struct shared_ctx *ctx,
     }
 
     if (ok) {
-        s_last_result_seq = ctx->result.point_count;
-        core_log(ctx->core, "CAM", "✅ 업로드 완료 (mTLS)");
+        copy_str(s_last_uploaded, sizeof(s_last_uploaded), ctx->result.json_path);
+        core_log(ctx->core, "CAM", " 업로드 완료 (mTLS)");
     } else {
         /* 파일은 로컬에 남아 있으므로 데이터를 잃지는 않는다. 사람이 나중에
          * 손으로 올릴 수 있도록 경로를 로그에 남긴다. */
         core_log(ctx->core, "CAM",
-                 "★ 업로드 실패 — 파일은 남아 있다: %s",
+                 "핵심: 업로드 실패 — 파일은 남아 있다: %s",
                  ctx->result.json_path);
         core_log(ctx->core, "CAM",
                  "  주소가 바뀌었으면 %s 의 host 를 고치면 된다(재시작 불필요)",
@@ -764,7 +772,7 @@ static void cam_on_state(struct shared_ctx *ctx,
         notice_post(ctx, NOTICE_UPLOAD_FAIL, 0u, "ERR_UPLOAD", reason);
     }
 
-    /* ★ 반드시 마지막에. 위 루프가 수십 초를 블로킹했으므로, 그 간격을
+    /* 핵심: 반드시 마지막에. 위 루프가 수십 초를 블로킹했으므로, 그 간격을
      *   heartbeat 두절로 오판하지 않게 기준선을 되맞춘다. 안 하면 성공한
      *   스캔마다 link_dead -> DISARM 이 뜬다. */
     core_hb_reprime(ctx->core);

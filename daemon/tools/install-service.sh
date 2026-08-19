@@ -8,7 +8,7 @@
 #    3. dtbo 를 /boot/firmware/overlays/ 로 + config.txt 에 dtoverlay= 등록
 #    4. adts-daemon.service 설치·활성화
 #
-#  ⚠️ 2·3 이 없으면 부팅 시 /dev/turret 이 없어서 서비스가 실패한다.
+#  주의: 2·3 이 없으면 부팅 시 /dev/turret 이 없어서 서비스가 실패한다.
 #     데몬만 다시 올리고 싶으면  --daemon-only
 #
 #  사용:  sudo bash daemon/tools/install-service.sh [--daemon-only] [--no-start]
@@ -39,7 +39,7 @@ else BOOTCFG=""; fi
 
 say() { echo "── $*"; }
 
-# ⚠️ 상주 서비스가 /dev/turret 을 쥐고 있으면 모듈을 못 내린다. 먼저 멈춘다.
+# 주의: 상주 서비스가 /dev/turret 을 쥐고 있으면 모듈을 못 내린다. 먼저 멈춘다.
 #   (마지막에 다시 켠다 — --no-start 면 안 켠다)
 if systemctl is-active --quiet adts-daemon 2>/dev/null; then
     say "실행 중인 adts-daemon 정지 (모듈 교체를 위해)"
@@ -77,7 +77,7 @@ if [ "$DAEMON_ONLY" -eq 0 ]; then
         : > /etc/modules-load.d/adts.conf
         for m in $MODS; do echo "$m" >> /etc/modules-load.d/adts.conf; done
 
-        # ★ 지금 커널에도 반영한다.
+        # 핵심: 지금 커널에도 반영한다.
         #
         #   modules-load.d 는 **부팅 때만** 읽힌다. 복사만 하고 끝내면
         #   지금 돌고 있는 것은 여전히 옛 모듈이라, /dev/turret 의 권한이나
@@ -93,7 +93,7 @@ if [ "$DAEMON_ONLY" -eq 0 ]; then
                 if rmmod "$m" 2>/dev/null; then
                     echo "   $m: 옛 모듈 내림"
                 else
-                    echo "   ⚠ $m: 사용 중이라 못 내림 — 새 .ko 는 재부팅 후 적용"
+                    echo "   주의: $m: 사용 중이라 못 내림 — 새 .ko 는 재부팅 후 적용"
                     NEED_REBOOT=1
                     continue
                 fi
@@ -101,12 +101,12 @@ if [ "$DAEMON_ONLY" -eq 0 ]; then
             if modprobe "$m" 2>/dev/null; then
                 echo "   $m: 적재됨"
             else
-                echo "   ⚠ $m: 적재 실패 — dmesg 확인"
+                echo "   주의: $m: 적재 실패 — dmesg 확인"
                 NEED_REBOOT=1
             fi
         done
     else
-        echo "⚠ driver/*.ko 가 없다 — 모듈 설치를 건너뛴다 (make rpi 로 빌드)"
+        echo "주의: driver/*.ko 가 없다 — 모듈 설치를 건너뛴다 (make rpi 로 빌드)"
     fi
 
     # 오버레이. turret 은 serdev 바인딩이라 **필수**, imu/led_sw 는 해당 하드웨어가
@@ -121,11 +121,11 @@ if [ "$DAEMON_ONLY" -eq 0 ]; then
                 echo "   config.txt 에 이미 등록됨"
             else
                 echo "dtoverlay=$n" >> "$BOOTCFG"
-                echo "   config.txt 에 추가 — ⚠️ 적용하려면 재부팅 필요"
+                echo "   config.txt 에 추가 — 주의: 적용하려면 재부팅 필요"
             fi
         done
     else
-        echo "⚠ config.txt 를 못 찾았다 — 오버레이 등록을 건너뛴다"
+        echo "주의: config.txt 를 못 찾았다 — 오버레이 등록을 건너뛴다"
     fi
 fi
 
@@ -134,11 +134,11 @@ say "유닛 설치: /etc/systemd/system/adts-daemon.service"
 install -Dm644 "$REPO/daemon/adts-daemon.service" /etc/systemd/system/adts-daemon.service
 systemctl daemon-reload
 
-# 카메라 접속 설정. ⚠️ **덮어쓰지 않는다** — 현장에서 사람이 고쳐 넣은 IP 가
+# 카메라 접속 설정. 주의: **덮어쓰지 않는다** — 현장에서 사람이 고쳐 넣은 IP 가
 # 들어있는 파일이라, 배포할 때마다 예제값으로 되돌리면 그날 스캔이 다 실패한다.
 if [ ! -e /etc/adts/camera.conf ]; then
     install -Dm644 "$REPO/daemon/camera.conf.example" /etc/adts/camera.conf
-    echo "   /etc/adts/camera.conf 생성 — ⚠ host 를 실제 카메라 IP 로 고칠 것"
+    echo "   /etc/adts/camera.conf 생성 — 주의: host 를 실제 카메라 IP 로 고칠 것"
 else
     echo "   /etc/adts/camera.conf 유지 (host = $(awk -F= '/^[[:space:]]*host/{gsub(/ /,"",$2); print $2}' /etc/adts/camera.conf))"
 fi
@@ -149,11 +149,11 @@ fi
 SVC_USER=$(awk -F= '/^User=/{print $2}' /etc/systemd/system/adts-daemon.service)
 for f in /etc/adts/certs/ca.crt /etc/adts/certs/daemon.crt /etc/adts/certs/daemon.key; do
     if [ ! -e "$f" ]; then
-        echo "⚠ 인증서 없음: $f  (broker/gen-certs.sh 로 발급)"
+        echo "주의: 인증서 없음: $f  (broker/gen-certs.sh 로 발급)"
     elif ! sudo -u "$SVC_USER" test -r "$f"; then
-        echo "⚠ $SVC_USER 가 못 읽음: $f"
+        echo "주의: $SVC_USER 가 못 읽음: $f"
         echo "   고치기: sudo chgrp $SVC_USER $f && sudo chmod 640 $f"
-        echo "   ⚠️ daemon.key 는 절대 644 로 두지 말 것 (개인키)"
+        echo "   주의: daemon.key 는 절대 644 로 두지 말 것 (개인키)"
     fi
 done
 
@@ -163,7 +163,7 @@ for d in /dev/turret /dev/imu /dev/led_sw; do
     if [ -e "$d" ]; then
         echo "   $(ls -l "$d")"
     else
-        echo "   ⚠ $d 없음 — 오버레이 적용/모듈 probe 확인 (dmesg)"
+        echo "   주의: $d 없음 — 오버레이 적용/모듈 probe 확인 (dmesg)"
     fi
 done
 
@@ -192,5 +192,5 @@ EOF
 
 if [ "${NEED_REBOOT:-0}" -eq 1 ]; then
     echo
-    echo "⚠️ 일부 모듈을 교체하지 못했다. 재부팅해야 새 .ko 가 적용된다: sudo reboot"
+    echo "주의: 일부 모듈을 교체하지 못했다. 재부팅해야 새 .ko 가 적용된다: sudo reboot"
 fi

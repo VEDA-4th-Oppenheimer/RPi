@@ -6,18 +6,18 @@
  *  토픽 계약: Confluence "MQTT 토픽 계약 — Qt 관제 ↔ RPi 스캐너 데몬" (31162383)
  *  이 파일은 그 문서에 적힌 것만 발행·구독한다. 바꾸려면 문서를 먼저 고칠 것.
  *
- *  ★ epoll 통합 (단일 스레드 유지)
+ *  핵심: epoll 통합 (단일 스레드 유지)
  *      get_fd()   -> mosquitto_socket()  을 코어 epoll 에 등록
  *      on_event() -> mosquitto_loop_read/write()
  *      on_tick()  -> mosquitto_loop_misc()  (keepalive·재접속)
- *    ⚠️ mosquitto_loop_start() (자체 스레드) 금지 — 콜백이 다른 스레드에서 불려
+ *    주의: mosquitto_loop_start() (자체 스레드) 금지 — 콜백이 다른 스레드에서 불려
  *      shared_ctx/FSM 에 락이 필요해지고 데몬의 무락 설계가 깨진다.
  *
- *  ★ 재연결 시 소켓 fd 가 바뀐다
+ *  핵심: 재연결 시 소켓 fd 가 바뀐다
  *    끊기면 get_fd() 가 -1 을 돌려주고, 다시 붙으면 새 fd 를 돌려준다.
  *    코어가 매 tick get_fd() 를 확인해 epoll 등록을 갱신한다.
  *
- *  ★ OpenSSL 고정 요건 = MQTT-over-TLS(8883) + mTLS 로 충족한다.
+ *  핵심: OpenSSL 고정 요건 = MQTT-over-TLS(8883) + mTLS 로 충족한다.
  *    브로커가 클라이언트 인증서를 요구하므로(require_certificate true) 인증서
  *    3종이 없으면 접속 자체가 안 된다. 없으면 모듈은 degraded 로 계속 구동한다
  *    — MQTT 가 안 붙어도 CLI(--scan)로는 스캔이 되어야 하기 때문.
@@ -55,7 +55,7 @@
 #define T_CMD_STOP       "adts/cmd/stop"
 #define T_CMD_HOME       "adts/cmd/home"
 #define T_CMD_DISARM     "adts/cmd/disarm"
-/* ⚠️ rearm 은 아직 계약 문서(Confluence 31162383)에 **없다**. 계약 §5 표는
+/* 주의: rearm 은 아직 계약 문서(Confluence 31162383)에 **없다**. 계약 §5 표는
  *   DISARM 상태에서 "복구" 버튼을 규정하는데 대응 토픽이 비어 있어, Qt 는
  *   지금 로컬 상태만 되돌리고 데몬은 DISARM 에 남는 불일치가 있다.
  *   여기서 먼저 구현해 두고 계약에 반영한다(이현우 협의 필요).
@@ -85,7 +85,7 @@
 #define STATE_HEARTBEAT_MS  5000u      /* 상태 무변화 시에도 주기 발행     */
 #define REQ_ID_LEN            33u      /* 32자 + NUL                        */
 
-/* ⚠️ 여기 있던 ERRC_LINK_DEAD/ERRC_HOME_TIMEOUT 을 지웠다. daemon_module.h 의
+/* 주의: 여기 있던 ERRC_LINK_DEAD/ERRC_HOME_TIMEOUT 을 지웠다. daemon_module.h 의
  *   NOTICE_* 와 **값은 같은데 이름만 다른 상수 두 벌**이 되어, 한쪽만 고치면
  *   조용히 어긋나는 상태였다. 계약 헤더 쪽 하나만 쓴다. */
 
@@ -98,7 +98,11 @@ static bool      s_connected;
 static bool      s_tls_ready;             /* 인증서 3종이 다 있었나          */
 
 static char      s_req_id[REQ_ID_LEN];    /* 현재 처리 중인 요청             */
-static char      s_last_req_id[REQ_ID_LEN];/* 중복 배달 판정용               */
+
+/* 중복 배달 판정용 — **토픽마다 따로** 기억한다(take_req_id 주석 참조). */
+enum { CMD_SLOT_SCAN = 0, CMD_SLOT_STOP, CMD_SLOT_HOME,
+       CMD_SLOT_DISARM, CMD_SLOT_REARM, CMD_SLOT_N };
+static char      s_last_req_id[CMD_SLOT_N][REQ_ID_LEN];
 
 static uint64_t  s_last_progress_ms;
 static uint64_t  s_last_state_ms;
@@ -113,7 +117,7 @@ static uint8_t   s_last_level_verdict;
 
 /* 방금 우리가 cmd/disarm 을 코어에 넘겼나.
  *
- * ★ 스캔이 정상 완료되면 코어가 되감기 유예(15초) 뒤 **스스로** DISARM 으로
+ * 핵심: 스캔이 정상 완료되면 코어가 되감기 유예(15초) 뒤 **스스로** DISARM 으로
  *   내려간다. 그런데 예전에는 DISARM 전이를 무조건 오류로 발행해서, 성공한
  *   스캔마다 "안전정지 진입"(code 100)이 하나씩 쌓였다. Qt 오류 로그가
  *   정상 동작으로 가득 차면 진짜 오류를 못 찾는다.
@@ -340,18 +344,62 @@ static bool get_pair(const cJSON *o, const char *key, int *a, int *b)
     return ok;
 }
 
+/* 토픽 -> 중복 판정 슬롯. 모르는 토픽은 NULL (호출자가 어차피 무시한다). */
+static char *last_req_id_slot(const char *topic)
+{
+    char *slot = NULL;
+
+    if (strcmp(topic, T_CMD_SCAN) == 0) {
+        slot = s_last_req_id[CMD_SLOT_SCAN];
+    } else if (strcmp(topic, T_CMD_STOP) == 0) {
+        slot = s_last_req_id[CMD_SLOT_STOP];
+    } else if (strcmp(topic, T_CMD_HOME) == 0) {
+        slot = s_last_req_id[CMD_SLOT_HOME];
+    } else if (strcmp(topic, T_CMD_DISARM) == 0) {
+        slot = s_last_req_id[CMD_SLOT_DISARM];
+    } else if (strcmp(topic, T_CMD_REARM) == 0) {
+        slot = s_last_req_id[CMD_SLOT_REARM];
+    } else {
+        slot = NULL;
+    }
+    return slot;
+}
+
 /* req_id 를 s_req_id 로 복사. 없으면 "-" 로 둔다.
- * 반환 false = 직전과 같은 id (QoS1 중복 배달) → 호출자가 무시할 것 */
-static bool take_req_id(const cJSON *o)
+ * 반환 false = **같은 토픽에서** 직전과 같은 id (QoS1 중복 배달) → 호출자가 무시.
+ *
+ * 주의: 두 가지를 고쳤다(둘 다 안전 명령을 삼키던 결함이다).
+ *
+ *   ① 직전 id 를 전역 하나로 두면 **토픽을 넘나들며** 걸린다. cmd/home 을
+ *      req_id "x" 로 보낸 뒤 cmd/scan 을 같은 "x" 로 보내면 스캔이 중복으로
+ *      판정돼 사라졌다. 토픽마다 따로 기억한다.
+ *
+ *   ② req_id 가 없으면 전부 "-" 가 되어, 두 번째 무-id 명령부터 자기 자신과
+ *      충돌했다. cmd/stop 뒤의 cmd/disarm 이 무시되는 식이다. **id 가 없으면
+ *      중복 판정을 하지 않는다** — 보낸 쪽이 식별자를 안 줬다는 건 재전송
+ *      보호를 요구하지 않는다는 뜻이고, 정지·안전정지는 두 번 실행돼도
+ *      해롭지 않지만 한 번 안 되면 위험하다. */
+static bool take_req_id(const char *topic, const cJSON *o)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "req_id");
-    const char  *s = cJSON_IsString(v) ? v->valuestring : "-";
-    bool fresh;
+    const bool   has = cJSON_IsString(v) && (v->valuestring[0] != '\0');
+    const char  *s   = has ? v->valuestring : "-";
+    char        *slot;
 
-    fresh = (strncmp(s, s_last_req_id, REQ_ID_LEN - 1u) != 0);
     (void)snprintf(s_req_id, sizeof(s_req_id), "%s", s);
-    (void)snprintf(s_last_req_id, sizeof(s_last_req_id), "%s", s);
-    return fresh;
+    if (!has) {
+        return true;                       /* ② 식별자 없음 → 항상 실행 */
+    }
+
+    slot = last_req_id_slot(topic);        /* ① 토픽별 기억 */
+    if (slot == NULL) {
+        return true;                       /* 모르는 토픽은 아래에서 걸러진다 */
+    }
+    if (strncmp(s, slot, REQ_ID_LEN - 1u) == 0) {
+        return false;
+    }
+    (void)snprintf(slot, REQ_ID_LEN, "%s", s);
+    return true;
 }
 
 static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
@@ -361,7 +409,7 @@ static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
     if (!get_pair(o, "pan_ddeg", &p0, &p1) ||
         !get_pair(o, "tilt_ddeg", &t0, &t1) ||
         !get_int (o, "step_ddeg", &step)) {
-        /* ⚠️ 예전에는 4(ERR_OUT_OF_RANGE)를 빌려 썼다. 그건 STM32 가 "스캔
+        /* 주의: 예전에는 4(ERR_OUT_OF_RANGE)를 빌려 썼다. 그건 STM32 가 "스캔
          *   범위 밖" 에 쓰는 코드라, Qt 가 code=4 를 받고도 STM 이 거절한
          *   건지 데몬이 페이로드를 못 읽은 건지 알 수 없었다. 데몬 자신의
          *   판정이므로 100번대를 쓴다. */
@@ -408,7 +456,7 @@ static void on_message(struct mosquitto *m, void *user,
         return;
     }
 
-    if (!take_req_id(o)) {
+    if (!take_req_id(msg->topic, o)) {
         /* QoS 1 은 at-least-once 라 같은 명령이 두 번 올 수 있다.
          * 스캔이 5분이라 중복 시작은 실제로 사고가 된다. */
         core_log(ctx->core, "MQTT", "%s: 중복 req_id[%s] — 무시",
@@ -490,7 +538,7 @@ static int mqtt_init(struct shared_ctx *ctx)
 
     s_ctx = ctx;
     (void)snprintf(s_req_id,      sizeof(s_req_id),      "-");
-    s_last_req_id[0] = '\0';
+    memset(s_last_req_id, 0, sizeof(s_last_req_id));
 
     mosquitto_lib_init();
     s_mosq = mosquitto_new(MQTT_CLIENT_ID, true, NULL);
@@ -587,7 +635,7 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
     {
         const uint8_t verdict = level_verdict(ctx);
 
-        /* ⚠️ 수평 판정이 뒤집히면 하트비트를 기다리지 않고 바로 알린다.
+        /* 주의: 수평 판정이 뒤집히면 하트비트를 기다리지 않고 바로 알린다.
          *   "초록 뜰 때까지 각도를 맞춘다" 는 조작 UX 인데 5초 지연이면
          *   나사를 돌리고 다섯을 세야 해서 쓸 수가 없다. */
         if ((verdict != s_last_level_verdict) ||
@@ -632,7 +680,7 @@ static void mqtt_on_state(struct shared_ctx *ctx,
         /* 파일 마감은 코어가 EXPORT 진입 시 수행하므로 result 가 채워져 있다. */
         publish_scan_result(ctx);
     } else if (new_st == ST_DISARM) {
-        /* ⚠️ 예전에는 여기서 무조건 오류를 발행했다. 스캔 후 자동 DISARM 이
+        /* 주의: 예전에는 여기서 무조건 오류를 발행했다. 스캔 후 자동 DISARM 이
          *   생기면서 **성공한 스캔마다 오류가 하나씩** 나가게 됐다.
          *   사유를 가려서, 알릴 가치가 있을 때만 보낸다. */
         const bool user = s_user_disarm;

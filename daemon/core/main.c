@@ -106,7 +106,7 @@ struct core {
 
     /* 정상 완료로 종료하는 중인가.
      *
-     * ⚠️ true 면 core_shutdown() 이 DISARM 을 보내지 않는다.
+     * 주의: true 면 core_shutdown() 이 DISARM 을 보내지 않는다.
      *   STM32 는 SCAN_DONE 을 보낸 **뒤** 케이블 되감기(역회전)를 수행하는데,
      *   DISARM 은 그 시퀀스를 즉시 중단시켜 축이 시작 각도로 못 돌아온다
      *   (라이다 케이블이 감긴 채 남아 다음 스캔 불가).
@@ -139,7 +139,7 @@ struct core {
  * 쳐도 여유가 크므로 재시도 간격은 짧게, 포기 시각은 넉넉히 잡는다. */
 #define HOME_RETRY_MS           500u
 
-/* ⚠️ 3000 이었는데 늘렸다. 홈이 판독만 하던 시절엔 응답이 수 ms 였지만, 지금은
+/* 주의: 3000 이었는데 늘렸다. 홈이 판독만 하던 시절엔 응답이 수 ms 였지만, 지금은
  *   판독 후 **양축을 기구각 0(홈 자세)으로 보내고** 도달·정착까지 확인한 뒤에야
  *   CMD_HOMED 를 올린다. 최악의 경우 180도 이동(22.5도/s = 8초) + 정착 3초라
  *   3초 타임아웃이면 정상 동작을 무응답으로 오판해 스캔이 매번 취소된다.
@@ -153,13 +153,13 @@ struct core {
  * 여자된 채 방치되고, 조작자는 화면만 보고 "끝난 건지 대기 중인지" 를 가릴 수
  * 없다. 그래서 EXPORT 를 지나면 DISARM 으로 내린다.
  *
- * ⚠️ **곧바로 보내면 안 된다.** STM32 는 CMD_SCAN_DONE 을 올린 **뒤** 케이블
+ * 주의: **곧바로 보내면 안 된다.** STM32 는 CMD_SCAN_DONE 을 올린 **뒤** 케이블
  *   되감기(역회전)를 스스로 수행하는데, CMD_DISARM 은 그 시퀀스를 즉시
  *   중단시킨다. 축이 시작 각도로 못 돌아오고 라이다 케이블이 감긴 채 남아
  *   다음 스캔이 불가능해진다. 되감기가 끝나면 STM32 가 스스로 PWM 을 끄므로,
  *   그때까지 기다렸다가 보내는 DISARM 은 안전 재확인이지 방해가 아니다.
  *
- * ⚠️ 이 값은 **되감기 실측 전까지의 잠정치**다. 프로토콜 v5 에 "되감기 완료"
+ * 주의: 이 값은 **되감기 실측 전까지의 잠정치**다. 프로토콜 v5 에 "되감기 완료"
  *   통지가 없어서(STM 은 CMD_STATUS 를 주기 발행하지 않는다) 시간으로 때우는
  *   수밖에 없다. 홈 이동 최악치(팬 180도 @22.5도/s ≈ 8초)에 여유를 더해 잡았다.
  *   실측 후 조정하거나, 펌웨어에 완료 통지를 추가하면 그걸로 갈아탈 것.
@@ -203,7 +203,7 @@ static int make_signalfd(void)
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
-    /* ★ SIGHUP 도 받는다. 안 받으면 기본 동작이 "즉시 종료" 라서 core_shutdown
+    /* 핵심: SIGHUP 도 받는다. 안 받으면 기본 동작이 "즉시 종료" 라서 core_shutdown
      *   이 안 불리고, **격자가 메모리에 있는 채로 프로세스가 사라진다** —
      *   산출물은 스캔이 끝날 때 한 번에 쓰이므로 27분짜리 스캔이 통째로 없어진다.
      *
@@ -232,7 +232,7 @@ static uint64_t mono_ms(void)
 
 /* 단조 증가 시각(ns). JSON 계약의 timestamp_ns 는 ns 고정이다.
  *
- * ⚠️ **clock domain 규칙**: scan.started_at_ns / ended_at_ns / measurement
+ * 주의: **clock domain 규칙**: scan.started_at_ns / ended_at_ns / measurement
  *   timestamp_ns 는 반드시 같은 시계여야 한다(계약 §일관성 검증 5번).
  *   따라서 셋 다 이 RPi 단조시계를 쓴다.
  *
@@ -241,7 +241,7 @@ static uint64_t mono_ms(void)
  *   349/349 전부 범위 밖이 됐다). STM 시계는 stm32_time_ms 필드로 따로 보존해
  *   나중에 offset 추정이 가능하게 한다.
  *
- *   ⚠️ 이 값은 UART 큐잉 지연(수 ms)을 포함한 **수신 시각**이다. 정밀 동기가
+ *   주의: 이 값은 UART 큐잉 지연(수 ms)을 포함한 **수신 시각**이다. 정밀 동기가
  *     필요해지면 stm32_time_ms 와의 회귀로 offset·drift 를 추정할 것. */
 
 static bool epoll_add(int epfd, int fd, uint32_t events)
@@ -286,7 +286,7 @@ static bool level_gate_ok(struct core *c)
 
         core_log(c, "LEVEL", "수평 NG: roll=%.2f pitch=%.2f (임계 %.1f) — 스캔 거부",
                  (double)l->roll_deg, (double)l->pitch_deg, (double)LEVEL_GATE_MAX_DEG);
-        /* ★ Qt 에 알린다. 이게 없으면 조작자 입장에서는 스캔을 시켰는데
+        /* 핵심: Qt 에 알린다. 이게 없으면 조작자 입장에서는 스캔을 시켰는데
          *   state 가 SCANNING 으로 안 가고 **아무 일도 안 일어난 것처럼** 보인다.
          *   fatal 로 보내는 이유: 킷을 물리적으로 다시 세우기 전에는 아무리
          *   눌러도 안 되므로 사용자 개입이 반드시 필요하다. */
@@ -329,7 +329,7 @@ static bool core_scan_begin(struct core *c)
         ss.step_ddeg       = r->step_ddeg;
         if (ioctl(c->turret_fd, TURRET_SCAN_START, &ss) < 0) {
             core_log(c, "SCAN", "SCAN_START ioctl 실패: %s", strerror(errno));
-            scan_out_close(&c->out);
+            (void)scan_out_close(&c->out);
             return false;
         }
     } else {
@@ -437,7 +437,7 @@ static void core_read_state(struct core *c)
         core_transition(c, ST_DISARM);
         return;
     }
-    /* ⚠️ 예전에는 이 로그가 `state == ST_SCANNING` 안에 갇혀 있었다. 그런데
+    /* 주의: 예전에는 이 로그가 `state == ST_SCANNING` 안에 갇혀 있었다. 그런데
      *   홈 대기 중 상태는 ST_IDLE 이라, STM 이 홈 도중 올린 ERR_NOT_HOMED
      *   (엔코더 I2C 판독 실패) / ERR_STALL(홈 수렴 실패) 이 last_err 에 담기기만
      *   하고 아무 데도 안 찍혔다. 데몬 화면에는 20초 침묵 뒤 "홈 무응답" 만
@@ -462,7 +462,7 @@ static void core_read_state(struct core *c)
 }
 
 /* heartbeat PING 송신 + 상태 갱신. 100ms tick 에서만 호출한다.
- * ⚠️ 이벤트 경로(POLLIN)에서 부르면 스캔 중 PING 이 초당 100회 나가
+ * 주의: 이벤트 경로(POLLIN)에서 부르면 스캔 중 PING 이 초당 100회 나가
  *   STM 메인루프를 마비시킨다. 그쪽은 core_read_state() 를 쓸 것. */
 static void core_poll_link(struct core *c)
 {
@@ -521,7 +521,7 @@ static bool core_await_home(struct core *c)
         core_log(c, "HOME",
                  "홈 무응답 %ums — 요청 취소 (링크/펌웨어 확인)",
                  HOME_TIMEOUT_MS);
-        /* ★ Qt 통지. STM 이 ERR 를 올렸다면 그건 link.last_err 로 따로 나가지만,
+        /* 핵심: Qt 통지. STM 이 ERR 를 올렸다면 그건 link.last_err 로 따로 나가지만,
          *   **아무 응답도 없는 경우**는 여기서만 알 수 있다. 실기에서 이 구멍
          *   때문에 UART 링크 문제로 오해했다(실제로는 엔코더 판독 실패였다). */
         (void)snprintf(msg, sizeof(msg),
@@ -543,13 +543,13 @@ static bool core_await_home(struct core *c)
 
 /* DISARM -> IDLE 복구(REARM).
  *
- * ★ 모터 재인가 명령은 보내지 않는다. protocol v5 에 CMD_ARM 이 없고, STM 은
+ * 핵심: 모터 재인가 명령은 보내지 않는다. protocol v5 에 CMD_ARM 이 없고, STM 은
  *   다음 HOME/SCAN_START 에서 스텝을 다시 켠다. 데몬은 스캔 직전에 항상 홈을
  *   다시 잡으므로(core_await_home), 복구는 데몬 상태만 되돌리면 충분하다.
- *   ⚠️ 즉 REARM 직후의 축 위치는 여전히 미지다 — "다시 스캔을 걸 수 있는
+ *   주의: 즉 REARM 직후의 축 위치는 여전히 미지다 — "다시 스캔을 걸 수 있는
  *     상태" 로 돌아갈 뿐, 물리적으로 홈에 선 것이 아니다.
  *
- * ★ 링크가 죽어 있으면 거부한다. 그 상태로 IDLE 로 올려봐야 다음 tick 의
+ * 핵심: 링크가 죽어 있으면 거부한다. 그 상태로 IDLE 로 올려봐야 다음 tick 의
  *   heartbeat 판정(core_read_state)이 곧바로 다시 DISARM 으로 떨어뜨린다.
  *   그 왕복은 retained 상태 발행으로 그대로 나가 Qt 화면만 깜빡이고, 조작자는
  *   "복구가 왜 안 되는지" 를 읽을 수 없다. 여기서 이유를 로그로 남기고 막는다.
@@ -605,7 +605,7 @@ static void core_eval_state(struct core *c)
                     c->ctx.req.valid = 0u;            /* 요청 소비 */
                     core_transition(c, ST_SCANNING);
                 } else if (c->exit_after_scan) {
-                    /* ⚠️ 홈 무응답·수평 NG 로 요청이 버려졌다. 예전에는 여기서
+                    /* 주의: 홈 무응답·수평 NG 로 요청이 버려졌다. 예전에는 여기서
                      *   아무것도 안 해서 --once 데몬이 **영원히 살아 있었다.**
                      *   스캔은 영영 안 오는데 프로세스는 안 죽으니, 배치로
                      *   돌리면 첫 실패에서 통째로 멈춘다. 종료한다. */
@@ -656,7 +656,7 @@ static void core_eval_state(struct core *c)
          *   세움 : 드라이버가 SCAN_START ioctl 시점에 (유실 없음)
          *   해제 : 드라이버가 STM 의 CMD_SCAN_DONE 수신 시
          *
-         * ⚠️ 과거 이 플래그가 계속 0 이라(STM 이 CMD_STATUS 를 주기 발행하지
+         * 주의: 과거 이 플래그가 계속 0 이라(STM 이 CMD_STATUS 를 주기 발행하지
          *   않음) 첫 배치 몇 점만 받고 즉시 완료로 오판해 .pcd 가 4점짜리로
          *   끊겼다(실측 확인). 드라이버가 명령 시점에 세우도록 고쳐 해결.
          *
@@ -750,15 +750,29 @@ static void core_transition(struct core *c, daemon_state_t want)
         (void)snprintf(c->ctx.result.json_path, sizeof(c->ctx.result.json_path),
                        "%s", scan_out_json_path(c->out));
         c->ctx.result.point_count = scan_out_point_count(c->out);
-        scan_out_close(&c->out);
-        c->ctx.result.valid       = 1u;
-        core_log(c, "EXPORT", "%s (%u점) — 카메라 단 전달 대기",
-                 c->ctx.result.path, c->ctx.result.point_count);
+
+        /* 주의: 무조건 1 을 세우면 안 된다. 권한·디스크 가득으로 파일이 안 써져도
+         *   MQTT 에는 성공이 나가고 카메라 모듈은 없는 파일을 올리려 든다.
+         *   실패를 감지하도록 고쳐놓고(§19-3) 그 신호를 여기로 잇지 않으면
+         *   40,342 점을 날렸던 그 사고가 그대로 재현된다. */
+        const bool wrote = scan_out_close(&c->out);
+        c->ctx.result.valid       = wrote ? 1u : 0u;
+        if (wrote) {
+            core_log(c, "EXPORT", "%s (%u점) — 카메라 단 전달 대기",
+                     c->ctx.result.path, c->ctx.result.point_count);
+        } else {
+            /* 사유는 scan_out_close 가 이미 상세히 찍었다. 여기서는 이 스캔이
+             * 산출물 없이 끝났다는 것만 분명히 한다. */
+            core_log(c, "EXPORT",
+                     "핵심: 산출물이 없다 — 업로드·보고 모두 실패로 처리한다");
+            notice_post(&c->ctx, NOTICE_EXPORT_FAIL, 1u, "ERR_EXPORT",
+                        "스캔 산출물 기록 실패 — 파일 없음");
+        }
     } else if (want == ST_DISARM) {
         if (c->turret_fd >= 0) {
             (void)ioctl(c->turret_fd, TURRET_DISARM);
         }
-        scan_out_close(&c->out);              /* 스캔 중이었으면 파일 마감 */
+        (void)scan_out_close(&c->out);              /* 스캔 중이었으면 파일 마감 */
         /* 홈 대기 중 정지했을 수 있다. 안 지우면 복구 후 IDLE 로 돌아온
          * 순간 취소된 홈이 되살아난다. */
         c->home_manual       = false;
@@ -849,7 +863,7 @@ static bool core_setup(struct core *c)
 
 /* 모듈 fd 가 바뀌었으면 epoll 등록을 갱신한다.
  *
- * ★ 예전에는 setup 에서 get_fd() 를 **한 번만** 부르고 끝이었다. 그런데
+ * 핵심: 예전에는 setup 에서 get_fd() 를 **한 번만** 부르고 끝이었다. 그런데
  *   소켓을 쓰는 모듈은 fd 가 런타임에 바뀐다:
  *     · mqtt — 브로커 재접속하면 새 소켓이라 fd 가 달라진다. 갱신하지 않으면
  *       코어는 **닫힌 옛 fd** 를 계속 감시하고 새 소켓의 수신은 영영 못 본다
@@ -860,7 +874,7 @@ static bool core_setup(struct core *c)
  *   약속하고 있었는데 구현이 없었다. 여기서 지킨다.
  *
  * 100ms tick 마다 get_fd() 를 부르는 비용은 함수 호출 몇 개라 무시할 수준이다.
- * ⚠️ EPOLL_CTL_DEL 은 **닫히기 전에** 불려야 하는데, 모듈이 이미 close 했다면
+ * 주의: EPOLL_CTL_DEL 은 **닫히기 전에** 불려야 하는데, 모듈이 이미 close 했다면
  *   커널이 알아서 등록을 해제하므로 실패해도 무해하다(반환값을 안 본다). */
 static void core_refresh_module_fds(struct core *c)
 {
@@ -902,7 +916,7 @@ static void core_tick(struct core *c)
     core_poll_link(c);           /* STM 링크 캐시 + heartbeat 판정 */
     core_refresh_module_fds(c);  /* 소켓 재접속 등으로 fd 가 바뀌었나 */
 
-    /* ⚠️ 복구를 정지보다 **먼저** 소비한다. 같은 tick 에 둘 다 서면(예: 조작자가
+    /* 주의: 복구를 정지보다 **먼저** 소비한다. 같은 tick 에 둘 다 서면(예: 조작자가
      *   REARM 을 누른 직후 링크가 끊겨 자동 정지가 걸린 경우) 나중에 처리되는
      *   쪽이 최종 상태가 되므로, 안전정지가 항상 이기도록 순서를 고정한다. */
     if (c->ctx.req_rearm != 0u) {           /* DISARM 해제 요청 */
@@ -952,7 +966,7 @@ static void core_on_turret_event(struct core *c)
         core_drain_scan_points(c);   /* POLLIN: 스캔 점 배치 도착 */
     }
 
-    /* ⚠️ 여기서 core_poll_link() 를 부르면 안 된다 — 그 안에 PING 송신이 있어
+    /* 주의: 여기서 core_poll_link() 를 부르면 안 된다 — 그 안에 PING 송신이 있어
      *   스캔 중 POLLIN(초당 100회)마다 PING 이 나가 STM 하행이 폭주한다.
      *   실측: STM 메인루프가 PING 처리에 묶여 scan_tick 이 굶고 FIFO 가 넘쳐
      *   점이 뭉텅이로 유실됐다(121/320점, ~210ms 주기 끊김).
@@ -1007,7 +1021,7 @@ static void core_shutdown(struct core *c)
     } else {
         /* turret 미연결(degraded) — 보낼 곳이 없다 */
     }
-    scan_out_close(&c->out);                  /* 스캔 중이었으면 파일 보존 */
+    (void)scan_out_close(&c->out);                  /* 스캔 중이었으면 파일 보존 */
     for (int i = 0; i < c->n_modules; ++i) {
         const struct daemon_module *m = c->modules[i];
         if (m->deinit != NULL) {
@@ -1077,7 +1091,7 @@ static void usage(const char *p)
         "           기구를 바꿔 재조립했을 때만 실측해서 넘기면 된다.\n"
         "  --once   스캔 1회 완료(EXPORT)되면 종료.\n"
         "\n"
-        "  ⚠ 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
+        "  주의: 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
         "    180도가 아니라 **179도까지**(1도 격자 기준) 돌려야 방위 360도가\n"
         "    정확히 한 번씩 덮인다. 180 까지 돌리면 양끝이 같은 평면이라 중복.\n"
         "\n"

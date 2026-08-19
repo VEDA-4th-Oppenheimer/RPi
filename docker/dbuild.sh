@@ -20,7 +20,7 @@ if ! "$DOCKER" ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' | grep -q
 fi
 
 if [ "${1:-}" = "clean" ]; then
-    # ⚠️ compile_commands.json 은 지우지 않는다 (CLion 인덱싱이 그 파일에 물려 있어서
+    # 주의: compile_commands.json 은 지우지 않는다 (CLion 인덱싱이 그 파일에 물려 있어서
     #    지우면 "compile_commands.json 을 찾을 수 없습니다" 로 프로젝트가 깨진다).
     echo ">> clean (compile_commands.json 은 보존)"
     exec "$DOCKER" exec "$CONTAINER" bash -c \
@@ -31,7 +31,7 @@ echo ">> build (vermagic 검증 포함)"
 "$DOCKER" exec "$CONTAINER" bash -c \
     'cd /work/driver && make rpi RPI_KDIR=/usr/src/linux LOCALVERSION=' 2>&1 | fixpath
 
-# ⚠️ 파이프를 거쳤으므로 $? 는 sed 것이다. make 의 실제 결과를 봐야
+# 주의: 파이프를 거쳤으므로 $? 는 sed 것이다. make 의 실제 결과를 봐야
 #   CLion 이 빌드 실패를 빨간불로 표시한다.
 STATUS="${PIPESTATUS[0]}"
 [ "$STATUS" -ne 0 ] && exit "$STATUS"
