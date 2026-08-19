@@ -421,7 +421,7 @@ MODULE_DESCRIPTION("ICM-20948 Level Detection Driver");
 //# 5. 칩 주소 실측 (이 보드는 0x69. 0x68 이면 AD0 가 L 인 보드다)
 //i2cdetect -y 1
 //
-//# 주의: 순서 주의: DT 노드가 먼저 있어야 insmod 때 매칭된다. 오버레이를
+//# 주의: 순서 DT 노드가 먼저 있어야 insmod 때 매칭된다. 오버레이를
 //#   나중에 올리면 compatible 속성만 바뀔 뿐 **재매칭이 안 일어나** probe 가
 //#   조용히 안 불린다. config.txt 로 부팅에 걸어두는 쪽이 확실하다.
 //Roll: 좌우 기울기, Pitch: 상하 기울기

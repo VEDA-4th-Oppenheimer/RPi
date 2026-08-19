@@ -80,7 +80,7 @@ static void update_leds_buzzer(const struct shared_ctx *ctx)
             ctrl.buzzer = 0u;
             s_buz_seq = BUZ_NONE;
         }
-        
+
         if (s_buz_seq != BUZ_NONE) {
             s_buz_ticks++;
         }

@@ -1,16 +1,16 @@
 # [DeviceDriver] RPi GPIO LED·스위치·부저 통합 커널 드라이버 (/dev/led_sw) 기술 명세서 v2.1
 
-> **작성자**: 강유근 (YOOGEUN KANG)  
-> **소속 / 프로젝트**: VEDA Oppenheimer Team / VEDA ADTS Project  
-> **문서 버전**: v2.1  
-> **개정일**: 2026-08-13  
-> **대상 모듈**: `/dev/led_sw` (RPi4 GPIO 직결 3색 LED + 2종 물리 스위치 + 수동 부저 통합 커널 드라이버)  
-> **관련 소스 파일**:  
-> - 커널 드라이버: `driver/led_sw_driver.c`  
-> - 공통 계약 헤더: `shared/led_sw.h`  
-> - Device Tree Overlay: `driver/overlays/led-sw-overlay.dts`  
-> - 유저 공간 데몬 모듈: `daemon/modules/led/led_module.c`  
-> - 검증 CLI 앱: `driver/led_sw_test.c`  
+> **작성자**: 강유근 (YOOGEUN KANG)
+> **소속 / 프로젝트**: VEDA Oppenheimer Team / VEDA ADTS Project
+> **문서 버전**: v2.1
+> **개정일**: 2026-08-13
+> **대상 모듈**: `/dev/led_sw` (RPi4 GPIO 직결 3색 LED + 2종 물리 스위치 + 수동 부저 통합 커널 드라이버)
+> **관련 소스 파일**:
+> - 커널 드라이버: `driver/led_sw_driver.c`
+> - 공통 계약 헤더: `shared/led_sw.h`
+> - Device Tree Overlay: `driver/overlays/led-sw-overlay.dts`
+> - 유저 공간 데몬 모듈: `daemon/modules/led/led_module.c`
+> - 검증 CLI 앱: `driver/led_sw_test.c`
 
 ---
 
