@@ -297,7 +297,8 @@ static void publish_scan_result(const struct shared_ctx *ctx)
  *     fatal=false  로그 한 줄. 스캔은 계속되거나 다시 시도하면 된다
  *
  * (Qt 는 이 필드를 이미 파싱하고 있었는데 데몬이 안 채워 항상 false 였다) */
-static void publish_error(int code, const char *name, const char *msg, bool fatal)
+static void publish_error(int code, const char *name, const char *msg,
+                          bool fatal, int axis)
 {
     cJSON *o = cJSON_CreateObject();
 
@@ -309,6 +310,13 @@ static void publish_error(int code, const char *name, const char *msg, bool fata
     (void)cJSON_AddStringToObject(o, "name", name);
     (void)cJSON_AddStringToObject(o, "msg",  msg);
     (void)cJSON_AddBoolToObject  (o, "fatal", fatal);
+    /* proto v6: 축. STM 오류에만 의미가 있고 데몬 자체 판정(100+)은 0 이다.
+     *
+     * 핵심: state/daemon 에도 last_err_axis 가 실리지만 그것만으로는 부족하다 —
+     *   Qt 가 오류를 찍는 것은 event/error 이고, 상태 토픽과 시각을 맞춰
+     *   짝지으라고 하면 화면 코드가 쓸데없이 복잡해진다. 오류의 "어디서" 는
+     *   오류와 함께 와야 한다. */
+    (void)cJSON_AddNumberToObject(o, "axis", axis);
     (void)cJSON_AddNumberToObject(o, "ts", (double)unix_ts());
     publish_json(T_EV_ERROR, o, 1, false);
 }
@@ -433,7 +441,7 @@ static void handle_cmd_scan(struct shared_ctx *ctx, const cJSON *o)
          *   건지 데몬이 페이로드를 못 읽은 건지 알 수 없었다. 데몬 자신의
          *   판정이므로 100번대를 쓴다. */
         publish_error((int)NOTICE_BAD_REQUEST, "ERR_BAD_REQUEST",
-                      "필수 필드 누락/형식 오류", false);
+                      "필수 필드 누락/형식 오류", false, 0);
         core_log(ctx->core, "MQTT", "cmd/scan 파싱 실패");
         return;
     }
@@ -669,13 +677,14 @@ static void mqtt_on_tick(struct shared_ctx *ctx, daemon_state_t state)
     if (ctx->notice.seq != s_notice_seq) {
         s_notice_seq = ctx->notice.seq;
         publish_error((int)ctx->notice.code, ctx->notice.name,
-                      ctx->notice.msg, ctx->notice.fatal != 0u);
+                      ctx->notice.msg, ctx->notice.fatal != 0u, 0);
     }
 
     /* STM 오류가 새로 뜨면 이벤트로 알린다 (같은 코드 반복 발행 방지) */
     if ((ctx->link.last_err != 0u) && (ctx->link.last_err != s_last_err_sent)) {
         publish_error(ctx->link.last_err, "STM_ERROR", "STM32 오류 통지",
-                      stm_err_is_fatal(ctx->link.last_err));
+                      stm_err_is_fatal(ctx->link.last_err),
+                      (int)ctx->link.last_err_axis);
         s_last_err_sent = ctx->link.last_err;
     } else if (ctx->link.last_err == 0u) {
         s_last_err_sent = 0u;
@@ -707,10 +716,10 @@ static void mqtt_on_state(struct shared_ctx *ctx,
 
         if (ctx->link.link_alive == 0u) {
             publish_error((int)NOTICE_DISARM, "ERR_DISARM",
-                          "링크 두절 — 배선/전원 확인", true);
+                          "링크 두절 — 배선/전원 확인", true, 0);
         } else if (ctx->link.last_err != 0u) {
             publish_error((int)NOTICE_DISARM, "ERR_DISARM",
-                          "STM32 오류로 안전정지", true);
+                          "STM32 오류로 안전정지", true, 0);
         } else if (user) {
             /* 사용자가 직접 눌렀다. 장비가 고장난 건 아니지만 **REARM 전까지
              * 스캔이 안 나가므로** fatal 이다(위 정의 참조). 여러 콘솔이 붙어
@@ -718,7 +727,7 @@ static void mqtt_on_state(struct shared_ctx *ctx,
              * 이름은 Qt 데모 브리지와 맞춘다 — 같은 사건이 실물/데모에서
              * 다르게 보이면 UI 를 두 번 만들게 된다. */
             publish_error((int)NOTICE_DISARM, "USER_DISARM",
-                          "사용자 안전정지", true);
+                          "사용자 안전정지", true, 0);
         } else {
             /* 스캔 후 되감기 유예 뒤의 자동 DISARM = 정상 종료.
              * state/daemon 전이만으로 충분하고 오류가 아니다. */
