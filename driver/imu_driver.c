@@ -101,7 +101,16 @@ static int i2c_read_bytes(struct i2c_client *client, u8 reg, u8 *buf, u8 len)
             .buf = buf,
         }
     };
-    return i2c_transfer(client->adapter, msgs, 2);
+    /* 주의: i2c_transfer 는 **전송한 메시지 수**를 돌려준다. 성공이면 반드시
+     *   2 이고, 어댑터에 따라 0 이나 1 이 나올 수 있다(주소 ACK 는 받았는데
+     *   데이터 단계에서 끊긴 경우). ret < 0 만 보면 그 부분 전송을 성공으로
+     *   읽어, 채워지지 않은 버퍼의 쓰레기 값을 가속도로 쓰게 된다. 수평
+     *   게이트가 그 값으로 판정하므로 조용히 틀린 답을 낸다. */
+    const int ret = i2c_transfer(client->adapter, msgs, 2);
+
+    if (ret < 0)
+        return ret;
+    return (ret == 2) ? 0 : -EIO;
 }
 
 /* 레지스터 뱅크 전환. ICM-20948 의 거의 모든 초기화가 이걸 거친다.

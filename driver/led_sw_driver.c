@@ -100,6 +100,14 @@ MODULE_PARM_DESC(gpio_ems, "GPIO pin for EMS Switch (default: 24)");
 #define BUZZER_PWM_PERIOD_NS 500000UL /* 500us = 2kHz */
 #define BUZZER_PWM_DUTY_NS 250000UL   /* 250us = 50% duty */
 
+/* gpio_owned 비트 — 어느 핀을 우리가 실제로 쥐고 있는가 */
+#define OWN_BUZZER     BIT(0)
+#define OWN_LED_GREEN  BIT(1)
+#define OWN_LED_YELLOW BIT(2)
+#define OWN_LED_RED    BIT(3)
+#define OWN_SW_SCAN    BIT(4)
+#define OWN_SW_EMS     BIT(5)
+
 struct led_sw_dev {
   struct miscdevice misc;
   struct mutex lock;
@@ -123,6 +131,14 @@ struct led_sw_dev {
   u8 led_state[LED_MAX];
   u8 sw_state[SW_MAX];
   bool misc_registered;
+
+  /* gpio_request 에 **실제로 성공한** 핀만 표시한다.
+   *
+   * 주의: 이게 없으면 teardown 이 gpio_is_valid(pin) 만 보고 해제하는데, 핀
+   *   번호는 DT 파싱 시점에 이미 유효하므로 probe 가 중간에 실패하면 요청한
+   *   적 없는 핀까지 놓게 된다. 커널이 WARN_ON 을 띄우고, 그 핀을 다른
+   *   드라이버가 쥐고 있었다면 그쪽 소유를 빼앗는다. */
+  u32 gpio_owned;
 
   /* 이벤트 FIFO (read/poll) */
   DECLARE_KFIFO(fifo, struct led_sw_event, EVENT_FIFO_SIZE);
@@ -189,7 +205,7 @@ static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
     } else {
       pwm_disable(dev->pwm_buzzer);
     }
-  } else if (gpio_is_valid(dev->pin_buzzer)) {
+  } else if ((dev->gpio_owned & OWN_BUZZER) && gpio_is_valid(dev->pin_buzzer)) {
     gpio_set_value(dev->pin_buzzer, on ? 1 : 0);
   }
 }
@@ -199,17 +215,21 @@ static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
  * ------------------------------------------------------------------------- */
 static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on) {
   int pin = -1;
+  u32 own = 0;
   on = !!on;
 
   switch (ch) {
   case LED_GREEN:
     pin = dev->pin_led_green;
+    own = OWN_LED_GREEN;
     break;
   case LED_YELLOW:
     pin = dev->pin_led_yellow;
+    own = OWN_LED_YELLOW;
     break;
   case LED_RED:
     pin = dev->pin_led_red;
+    own = OWN_LED_RED;
     break;
   case LED_BUZZER:
     if (on != dev->led_state[LED_BUZZER]) {
@@ -221,7 +241,10 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on) {
     return;
   }
 
-  if (gpio_is_valid(pin)) {
+  /* 주의: 핀 번호가 유효한 것과 그 핀을 우리가 쥔 것은 다르다. 요청이
+   *   실패해도 probe 가 계속되는 경로가 있어(부저), 소유를 안 보면 남의
+   *   핀이나 미요청 핀에 값을 쓰게 된다. */
+  if ((dev->gpio_owned & own) && gpio_is_valid(pin)) {
     gpio_set_value(pin, on);
     dev->led_state[ch] = on;
   }
@@ -389,6 +412,15 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
   return ret;
 }
 
+/* request_gpio_safe + 소유 표시. 성공한 핀만 teardown 이 해제한다. */
+static int claim_gpio(int pin, unsigned long flags, const char *label, u32 bit) {
+  const int ret = request_gpio_safe(pin, flags, label);
+
+  if (ret == 0)
+    g_led_sw->gpio_owned |= bit;
+  return ret;
+}
+
 /* ---------------------------------------------------------------------------
  *  Platform Probe & Remove
  * ------------------------------------------------------------------------- */
@@ -427,18 +459,22 @@ static void led_sw_teardown(void) {
       g_led_sw->pwm_buzzer = NULL;
     }
 
-    if (gpio_is_valid(g_led_sw->pin_sw_ems))
+    /* 주의: gpio_is_valid 가 아니라 **소유 비트**를 본다. 핀 번호는 DT 를 읽은
+     *   순간 유효해지므로, 그것만 보면 요청이 실패했거나 아직 요청하지 않은
+     *   핀까지 해제하게 된다(WARN_ON, 그리고 남이 쥔 핀이면 그쪽 소유 파괴). */
+    if (g_led_sw->gpio_owned & OWN_SW_EMS)
       gpio_free(g_led_sw->pin_sw_ems);
-    if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
+    if (g_led_sw->gpio_owned & OWN_SW_SCAN)
       gpio_free(g_led_sw->pin_sw_scan_start);
-    if (gpio_is_valid(g_led_sw->pin_buzzer))
+    if (g_led_sw->gpio_owned & OWN_BUZZER)
       gpio_free(g_led_sw->pin_buzzer);
-    if (gpio_is_valid(g_led_sw->pin_led_red))
+    if (g_led_sw->gpio_owned & OWN_LED_RED)
       gpio_free(g_led_sw->pin_led_red);
-    if (gpio_is_valid(g_led_sw->pin_led_yellow))
+    if (g_led_sw->gpio_owned & OWN_LED_YELLOW)
       gpio_free(g_led_sw->pin_led_yellow);
-    if (gpio_is_valid(g_led_sw->pin_led_green))
+    if (g_led_sw->gpio_owned & OWN_LED_GREEN)
       gpio_free(g_led_sw->pin_led_green);
+    g_led_sw->gpio_owned = 0;
 
     g_led_sw = NULL;
   }
@@ -524,7 +560,8 @@ static int led_sw_probe(struct platform_device *pdev) {
     pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
   } else {
     /* Hardware PWM 미사용 시에만 일반 GPIO 요청 */
-    ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
+    ret = claim_gpio(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer",
+                     OWN_BUZZER);
     if (ret) {
       pr_warn("led_sw: gpio buzzer (%d) request warning: %d\n",
               g_led_sw->pin_buzzer, ret);
@@ -532,23 +569,24 @@ static int led_sw_probe(struct platform_device *pdev) {
   }
 
   /* GPIO 요청 - LED */
-  ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW,
-                          "led_green");
+  ret = claim_gpio(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green",
+                    OWN_LED_GREEN);
   if (ret) {
     pr_err("led_sw: gpio green (%d) request failed: %d\n",
            g_led_sw->pin_led_green, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW,
-                          "led_yellow");
+  ret = claim_gpio(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow",
+                    OWN_LED_YELLOW);
   if (ret) {
     pr_err("led_sw: gpio yellow (%d) request failed: %d\n",
            g_led_sw->pin_led_yellow, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
+  ret = claim_gpio(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red",
+                    OWN_LED_RED);
   if (ret) {
     pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red,
            ret);
@@ -557,14 +595,15 @@ static int led_sw_probe(struct platform_device *pdev) {
 
   /* GPIO 요청 - Switches */
   ret =
-      request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
+      claim_gpio(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start",
+                    OWN_SW_SCAN);
   if (ret) {
     pr_err("led_sw: gpio scan_start (%d) request failed: %d\n",
            g_led_sw->pin_sw_scan_start, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
+  ret = claim_gpio(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems", OWN_SW_EMS);
   if (ret) {
     pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems,
            ret);

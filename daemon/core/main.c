@@ -261,9 +261,17 @@ static void core_transition(struct core *c, daemon_state_t want);
  *  스캔 제어 (/dev/turret ioctl)
  * ------------------------------------------------------------------------- */
 
+/* 격자 간격의 상한. 한 바퀴(360.0도)를 넘는 간격은 의미가 없다.
+ *
+ * 주의: 상한이 없으면 산출 쪽에서 cols = 3600/step 이 **0** 이 되고, 뒤이은
+ *   cols-1 이 unsigned 언더플로로 4294967295 가 된다. MQTT 는 int 로 받아
+ *   uint16_t 로 줄이므로 음수도 큰 양수로 들어온다. 여기서 막는 편이
+ *   격자 코드 곳곳에 방어를 흩뿌리는 것보다 낫다. */
+#define SCAN_STEP_DDEG_MAX  3600u
+
 static bool scan_request_valid(const struct scan_request *r)
 {
-    return  r->step_ddeg > 0u
+    return  r->step_ddeg > 0u  &&  r->step_ddeg <= SCAN_STEP_DDEG_MAX
         &&  r->pan_start_ddeg  >= PAN_MIN  && r->pan_start_ddeg  <= PAN_MAX
         &&  r->pan_end_ddeg    >= PAN_MIN  && r->pan_end_ddeg    <= PAN_MAX
         &&  r->tilt_start_ddeg >= TILT_MIN && r->tilt_start_ddeg <= TILT_MAX
@@ -580,8 +588,40 @@ static void core_rearm(struct core *c)
     core_transition(c, ST_IDLE);
 }
 
+/* 지금 상태에서 받을 수 없는 스캔 요청을 그 자리에서 거절한다.
+ *
+ * 주의: 이게 없으면 요청이 **큐에 남아 나중에 저절로 실행된다.** 요청은
+ *   ST_IDLE 에서만 소비되는데 소비하면서 valid 를 지우므로, 스캔 중에 LED
+ *   버튼을 누르거나 cmd/scan 이 오면 플래그가 선 채로 남아 있다가 스캔이
+ *   끝나 IDLE 로 떨어지는 순간 **새 스캔이 자동으로 시작된다.** 14분짜리라
+ *   조작자가 의도하지 않은 동작이고, 화면에는 아무 이유도 안 나온다.
+ *
+ *   DISARM 에서도 마찬가지로 조용히 버려지고 있었다. 거절 자체는 맞지만
+ *   왜 안 되는지가 안 보이면 "눌렀는데 아무 일도 안 난다" 가 된다. */
+static void core_reject_untimely_scan(struct core *c)
+{
+    const char *why;
+
+    if (c->ctx.req.valid == 0u) {
+        return;
+    }
+    if (c->ctx.state == ST_DISARM) {
+        why = "안전정지 상태 — cmd/rearm 으로 해제한 뒤 다시 요청하십시오";
+    } else {
+        why = "이미 스캔이 진행 중입니다";
+    }
+    c->ctx.req.valid = 0u;
+    core_log(c, "FSM", "스캔 요청 거절 (%s): %s",
+             daemon_state_str(c->ctx.state), why);
+    notice_post(&c->ctx, NOTICE_BUSY, 0u, "ERR_BUSY", why);
+}
+
 static void core_eval_state(struct core *c)
 {
+    if (c->ctx.state != ST_IDLE) {
+        core_reject_untimely_scan(c);
+    }
+
     switch (c->ctx.state) {
     case ST_IDLE:
         /* 새 작업이 들어오면 예약된 자동 DISARM 을 취소한다. 조작자가 킷을
@@ -888,6 +928,31 @@ static void core_refresh_module_fds(struct core *c)
         const int old_fd = c->module_fd[i];
 
         if (now_fd == old_fd) {
+            /* 주의: 번호가 같다고 **같은 소켓이라는 보장이 없다.** 재접속이
+             *   한 tick(100ms) 안에 끝나면 커널이 방금 닫힌 번호를 그대로
+             *   재배정할 수 있는데, 그러면 옛 등록은 close 로 이미 사라졌고
+             *   새 소켓은 등록된 적이 없어 수신이 영영 안 온다.
+             *
+             *   등록 여부를 직접 물어본다. MOD 는 등록돼 있으면 성공하고
+             *   없으면 ENOENT 를 준다 — 그때만 새로 넣는다. 모듈 몇 개
+             *   × 10Hz 라 비용은 무시할 수준이다. */
+            if (now_fd >= 0) {
+                struct epoll_event ev;
+
+                memset(&ev, 0, sizeof(ev));
+                ev.events  = EPOLLIN;
+                ev.data.fd = now_fd;
+                if ((epoll_ctl(c->epoll_fd, EPOLL_CTL_MOD, now_fd, &ev) != 0)
+                    && (errno == ENOENT)) {
+                    if (epoll_add(c->epoll_fd, now_fd, EPOLLIN)) {
+                        core_log(c, "SETUP",
+                                 "module '%s' fd %d 재등록 (번호 재사용 감지)",
+                                 m->name, now_fd);
+                    } else {
+                        c->module_fd[i] = -1;   /* 다음 tick 에 다시 시도 */
+                    }
+                }
+            }
             continue;
         }
         if (old_fd >= 0) {

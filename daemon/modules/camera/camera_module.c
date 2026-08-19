@@ -56,8 +56,10 @@
 #include "daemon_module.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <signal.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -367,6 +369,63 @@ static bool tls_ctx_ready(char *reason, size_t reason_len)
     return true;
 }
 
+/* connect 에 우리 타임아웃을 건다. 성공하면 true, 그 자리에서 fd 는 다시
+ * 블로킹 모드로 돌아간다.
+ *
+ * 주의: SO_SNDTIMEO/SO_RCVTIMEO 는 **connect 에 안 걸린다.** 그 둘은 연결이
+ *   성립된 소켓의 읽기/쓰기에만 적용된다. 그래서 블로킹 connect 는 커널
+ *   기본 재시도가 끝날 때까지 돌아오지 않는데, 리눅스 기본 tcp_syn_retries=6
+ *   이면 응답 없는 주소에서 약 127초다. 재시도 3회면 6분 넘게 걸리고, 데몬은
+ *   단일 스레드 epoll 이라 그동안 MQTT keepalive·EMS 스위치·STM heartbeat 가
+ *   전부 멈춘다. 상대가 RST 를 주면(앱만 안 떠 있는 경우) 즉시 실패하므로
+ *   평소엔 안 드러나고, 카메라 전원이 빠지거나 IP 가 옮겨간 날 터진다.
+ *
+ * 주의: select 가 쓰기 가능으로 깨워도 성공이 아니다 — 실패한 소켓도 쓰기
+ *   가능으로 깨어난다. 실제 결과는 SO_ERROR 에만 있다. 이걸 빼면 죽은
+ *   연결에 TLS 핸드셰이크를 시도하게 된다.
+ *
+ * 주의: 연결 뒤 반드시 블로킹으로 되돌린다. 논블로킹인 채로 두면 OpenSSL 이
+ *   WANT_READ/WANT_WRITE 를 뱉어서 전송 루프를 통째로 다시 써야 한다. */
+static bool connect_with_deadline(int fd, const struct sockaddr *sa, socklen_t len)
+{
+    const int flags = fcntl(fd, F_GETFL, 0);
+    fd_set  wset;
+    struct timeval tv;
+    int     err  = 0;
+    socklen_t elen = sizeof(err);
+    bool    ok   = false;
+
+    if ((flags < 0) || (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)) {
+        return false;
+    }
+
+    if (connect(fd, sa, len) == 0) {
+        ok = true;
+    } else if (errno == EINPROGRESS) {
+        /* select 는 fd 가 FD_SETSIZE(1024) 미만이어야 한다. 데몬이 여는 fd 는
+         * 십여 개뿐이라 넘을 일이 없지만, 넘으면 스택을 밟으므로 막아둔다. */
+        if (fd < FD_SETSIZE) {
+            FD_ZERO(&wset);
+            FD_SET(fd, &wset);
+            memset(&tv, 0, sizeof(tv));
+            tv.tv_sec = s_timeout_s;
+
+            if (select(fd + 1, NULL, &wset, NULL, &tv) > 0) {
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) == 0) {
+                    ok = (err == 0);
+                }
+            }
+        }
+    } else {
+        ok = false;
+    }
+
+    if (fcntl(fd, F_SETFL, flags) < 0) {
+        ok = false;
+    }
+    return ok;
+}
+
 /* getaddrinfo 로 접속. 호스트명도 IP 도 받는다. 실패 시 -1. */
 static int connect_camera(void)
 {
@@ -389,7 +448,7 @@ static int connect_camera(void)
         if (fd < 0) {
             continue;
         }
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
+        if (connect_with_deadline(fd, a->ai_addr, a->ai_addrlen)) {
             break;
         }
         (void)close(fd);
