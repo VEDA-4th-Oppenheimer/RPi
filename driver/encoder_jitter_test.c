@@ -213,32 +213,37 @@ static void save_markdown_report(const char *filepath, int count, int interval_m
 int main(int argc, char *argv[])
 {
     int sample_count = 1000;
-    int interval_ms = 30;
+    int interval_ms = 50;
+    bool free_mode = false;
     char report_file[256] = {0};
 
-    if (argc >= 2) {
-        if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
-            printf("Usage: %s [samples] [interval_ms] [output_file.md]\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            printf("Usage: %s [samples] [interval_ms] [output_file.md] [--disarm]\n", argv[0]);
             printf("  samples        : Number of samples to collect (default: 1000, min: 10)\n");
-            printf("  interval_ms    : Sampling interval in milliseconds (default: 30, min: 10)\n");
-            printf("  output_file.md : Output markdown report file path (default: auto-generated timestamp)\n");
+            printf("  interval_ms    : Sampling interval in ms (default: 50, min: 20)\n");
+            printf("  output_file.md : Output markdown report path (default: auto-generated timestamp)\n");
+            printf("  --disarm       : Disable motor holding torque (Free-wheel mode, manual rotation)\n");
             return 0;
+        } else if (!strcmp(argv[i], "--disarm") || !strcmp(argv[i], "--free")) {
+            free_mode = true;
+        } else if (sample_count == 1000 && atoi(argv[i]) > 0 && i == 1) {
+            sample_count = atoi(argv[i]);
+        } else if (interval_ms == 50 && atoi(argv[i]) > 0 && i == 2) {
+            interval_ms = atoi(argv[i]);
+        } else if (report_file[0] == '\0' && strstr(argv[i], ".md")) {
+            snprintf(report_file, sizeof(report_file), "%s", argv[i]);
         }
-        sample_count = atoi(argv[1]);
     }
-    if (argc >= 3) {
-        interval_ms = atoi(argv[2]);
-    }
-    if (argc >= 4) {
-        snprintf(report_file, sizeof(report_file), "%s", argv[3]);
-    } else {
+
+    if (report_file[0] == '\0') {
         time_t now = time(NULL);
         struct tm *t = localtime(&now);
         strftime(report_file, sizeof(report_file), "encoder_jitter_report_%Y%m%d_%H%M%S.md", t);
     }
 
     if (sample_count < 10) sample_count = 10;
-    if (interval_ms < 10) interval_ms = 10;
+    if (interval_ms < 20) interval_ms = 20;
 
     int fd = open(DEV_TURRET, O_RDWR);
     if (fd < 0) {
@@ -258,18 +263,39 @@ int main(int argc, char *argv[])
     }
 
     printf("===================================================================\n");
-    printf(" MT6701 홀 센서 정지상태 지터링 측정을 시작합니다...\n");
-    printf(" 대상 장치  : %s\n", DEV_TURRET);
-    printf(" 샘플 수    : %d 개\n", sample_count);
-    printf(" 샘플링주기 : %d ms (예상 소요시간: 약 %.1f 초)\n", interval_ms, (double)(sample_count * interval_ms) / 1000.0);
-    printf(" 결과 저장  : %s\n", report_file);
+    printf(" [MT6701 홀 센서 정지상태 지터링 측정 도구 (노이즈 정밀 분석)]\n");
+    printf(" - 대상 장치  : %s\n", DEV_TURRET);
+    printf(" - 동작 모드  : %s\n", free_mode ? "모터 락 해제 모드 (Free-wheel / DISARM)" : "모터 정지 유지 모드 (Holding Torque)");
+    printf(" - 샘플 수    : %d 개\n", sample_count);
+    printf(" - 샘플링주기 : %d ms (예상 소요시간: 약 %.1f 초)\n", interval_ms, (double)(sample_count * interval_ms) / 1000.0);
+    printf(" - 결과 파일  : %s\n", report_file);
     printf("===================================================================\n\n");
 
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+    if (free_mode) {
+        printf("[준비] 모터 락 해제(DISARM) 명령 전송 중...\n");
+        if (ioctl(fd, TURRET_DISARM) < 0) {
+            perror("ioctl TURRET_DISARM");
+        }
+        usleep(500000); /* 0.5초 대기 */
+        printf("✓ 모터 락이 풀렸습니다. 원하는 각도에 두고 측정을 진행합니다.\n\n");
+    } else {
+        printf("[1단계] 최초 1회 홈 이동 및 정착(Settling) 진행 중...\n");
+        if (ioctl(fd, TURRET_HOME) < 0) {
+            perror("ioctl TURRET_HOME");
+        }
+        /* 홈 완료 통지 대기 */
+        (void)poll(&pfd, 1, 2000);
+        printf("-> 모터 물리적 이동 완료. 잔여 진동 감쇠 대기 중 (1.5초)...\n");
+        usleep(1500000); /* 1.5초 정착 대기 */
+        printf("✓ 모터가 완전 정지 상태에 도달했습니다. 순수 센서 지터 측정을 시작합니다.\n\n");
+    }
+
     int collected = 0;
 
     for (int i = 0; i < sample_count; i++) {
-        /* CMD_HOME ioctl 요청 */
+        /* 엔코더 판독 요청 */
         if (ioctl(fd, TURRET_HOME) < 0) {
             perror("ioctl TURRET_HOME");
             break;
