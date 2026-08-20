@@ -56,9 +56,11 @@ ccflags-y += -I$(src) -I$(src)/.. -I$(src)/../shared $(EXTRA_CFLAGS)
 PROTO_H := $(firstword $(wildcard protocol.h) $(wildcard ../shared/protocol.h) $(wildcard ../protocol.h))
 
 # ── 타겟 ──
-.PHONY: all rpi modules clean dtbo
+.PHONY: all rpi modules clean dtbo apps
 
-all: dtbo modules turret_test imu_test led_sw_test
+apps: turret_test imu_test led_sw_test encoder_jitter_test
+
+all: dtbo modules apps
 
 
 # 라즈베리파이(arm64) 크로스 빌드 원샷: .ko + 유저 앱 전부 arm64
