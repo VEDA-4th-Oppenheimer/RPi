@@ -80,6 +80,10 @@ imu_test: imu_test.c
 led_sw_test: led_sw_test.c
 	$(APP_CC) $(APP_CFLAGS) -I. -I.. -I../shared -o $@ $<
 
+# MT6701 홀 센서 엔코더 지터링 측정 테스트 앱
+encoder_jitter_test: encoder_jitter_test.c $(PROTO_H)
+	$(APP_CC) $(APP_CFLAGS) -DPROTO_WANT_IOCTL -I. -I.. -I../shared -o $@ $< -lm
+
 # ── Device Tree 오버레이 ──
 #  overlays/ 에 *-overlay.dts 를 놓기만 하면 자동으로 잡힌다.
 #  (드라이버가 늘어날 때마다 여기를 고치지 않아도 되도록 패턴 규칙을 쓴다)
@@ -93,4 +97,4 @@ overlays/%.dtbo: overlays/%.dts
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	rm -f turret_test imu_test led_sw_test overlays/*.dtbo
+	rm -f turret_test imu_test led_sw_test encoder_jitter_test overlays/*.dtbo
