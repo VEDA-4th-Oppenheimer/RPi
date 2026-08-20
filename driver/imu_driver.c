@@ -2,7 +2,7 @@
  * imu_driver.c — ICM-20948 I2C 캐릭터 디바이스 드라이버
  *
  * MPU-6050 에서 ICM-20948 로 교체. 배선은 동일(SDA/SCL/GND/VCC)하지만
- * ⚠️ **슬레이브 주소가 0x68 -> 0x69 로 바뀐다.** GY-521 은 AD0 를 L 로 묶어
+ * 주의: **슬레이브 주소가 0x68 -> 0x69 로 바뀐다.** GY-521 은 AD0 를 L 로 묶어
  *   0x68 이었는데 이 ICM-20948 브레이크아웃은 AD0 가 H 다. 배선이 같아서
  *   주소도 같으려니 하고 넘어가기 쉬운 지점이다(overlays/imu-overlay.dts 참조).
  *
@@ -17,7 +17,7 @@
  *   ① 레지스터 뱅크. ICM-20948 은 레지스터가 4개 뱅크로 나뉘어 있고,
  *      REG_BANK_SEL(0x7F) 로 골라야 한다. 이 레지스터만 모든 뱅크에서 보인다.
  *      설정은 뱅크2, 데이터/전원은 뱅크0 이라 probe 가 뱅크를 오간다.
- *      ⚠️ 읽기 경로(imu_read)는 뱅크0 만 건드리므로, probe 는 반드시
+ *      주의: 읽기 경로(imu_read)는 뱅크0 만 건드리므로, probe 는 반드시
  *        **뱅크0 으로 되돌려놓고** 끝나야 한다.
  *   ② 주소 이동. PWR_MGMT_1  0x6B -> 0x06 (뱅크0)
  *                 가속도 시작  0x3B -> 0x2D (뱅크0)
@@ -72,7 +72,7 @@
 #define ICM20948_REG_ACCEL_CONFIG   0x14
 /* ACCEL_CONFIG = [5:3]DLPFCFG | [2:1]FS_SEL | [0]FCHOICE
  *   DLPFCFG=6 -> 5.7Hz,  FS_SEL=0 -> ±2g(16384 LSB/g),  FCHOICE=1 -> DLPF 사용
- * ⚠️ FS_SEL 을 바꾸면 데몬의 IMU_ACCEL_LSB_PER_G(16384) 도 같이 고쳐야 한다.
+ * 주의: FS_SEL 을 바꾸면 데몬의 IMU_ACCEL_LSB_PER_G(16384) 도 같이 고쳐야 한다.
  *   두 곳이 어긋나면 각도가 아니라 스케일만 틀려서 잘 안 드러난다. */
 #define ICM20948_ACCEL_CFG_2G_5HZ   0x31
 
@@ -101,7 +101,16 @@ static int i2c_read_bytes(struct i2c_client *client, u8 reg, u8 *buf, u8 len)
             .buf = buf,
         }
     };
-    return i2c_transfer(client->adapter, msgs, 2);
+    /* 주의: i2c_transfer 는 **전송한 메시지 수**를 돌려준다. 성공이면 반드시
+     *   2 이고, 어댑터에 따라 0 이나 1 이 나올 수 있다(주소 ACK 는 받았는데
+     *   데이터 단계에서 끊긴 경우). ret < 0 만 보면 그 부분 전송을 성공으로
+     *   읽어, 채워지지 않은 버퍼의 쓰레기 값을 가속도로 쓰게 된다. 수평
+     *   게이트가 그 값으로 판정하므로 조용히 틀린 답을 낸다. */
+    const int ret = i2c_transfer(client->adapter, msgs, 2);
+
+    if (ret < 0)
+        return ret;
+    return (ret == 2) ? 0 : -EIO;
 }
 
 /* 레지스터 뱅크 전환. ICM-20948 의 거의 모든 초기화가 이걸 거친다.
@@ -132,7 +141,7 @@ static ssize_t imu_read(struct file *filep, char __user *buffer, size_t len, lof
 
     /* probe 가 뱅크0 으로 되돌려놓고 끝나고, 런타임에 뱅크를 바꾸는 경로가
      * 여기 말고 없으므로 매 read 마다 뱅크를 다시 고르지 않는다.
-     * ⚠️ 나중에 자이로/자력계 설정을 런타임에 바꾸는 코드를 추가한다면,
+     * 주의: 나중에 자이로/자력계 설정을 런타임에 바꾸는 코드를 추가한다면,
      *   그 경로가 반드시 뱅크0 으로 복구하거나 여기서 매번 선택해야 한다. */
     ret = i2c_read_bytes(client, ICM20948_REG_ACCEL_XOUT_H, raw_buf, 6);
     mutex_unlock(&imu_lock);
@@ -166,7 +175,7 @@ static struct file_operations imu_fops = {
 
 /* /dev/imu 노드 권한. devtmpfs 가 노드를 만들 때 이 콜백으로 모드를 묻는다.
  *
- * ⚠️ turret 은 miscdevice 라 구조체의 .mode 필드 하나로 끝나지만, 여기는
+ * 주의: turret 은 miscdevice 라 구조체의 .mode 필드 하나로 끝나지만, 여기는
  *   class_create + device_create 방식이라 클래스에 콜백을 달아야 한다.
  *   두 드라이버의 권한 설정 방법이 다른 이유가 이 등록 방식 차이다.
  *
@@ -258,7 +267,7 @@ static int icm20948_setup(struct i2c_client *client)
         return ret;
     }
 
-    /* 6) ★ 반드시 뱅크0 으로 복귀. imu_read 가 뱅크0(0x2D)을 읽는다. */
+    /* 6) 핵심: 반드시 뱅크0 으로 복귀. imu_read 가 뱅크0(0x2D)을 읽는다. */
     ret = icm20948_set_bank(client, ICM20948_BANK_0);
     if (ret < 0) {
         pr_err("IMU Driver: BANK_SEL(0) 복귀 실패 (%d)\n", ret);
@@ -273,7 +282,7 @@ static int icm20948_probe(struct i2c_client *client)
 {
     int ret;
 
-    /* ★ 초기화가 **끝난 뒤에** imu_client 를 공개한다.
+    /* 핵심: 초기화가 **끝난 뒤에** imu_client 를 공개한다.
      *
      *   MPU-6050 판에서는 probe 진입 직후에 공개했는데, 그러면 리셋~웨이크
      *   사이 150ms 동안 read() 가 초기화 중인 칩을 읽는다. ICM-20948 에서는
@@ -311,12 +320,12 @@ MODULE_DEVICE_TABLE(i2c, icm20948_id);
 
 /* Device Tree 매칭 (overlays/imu-overlay.dts).
  *
- * ★ 이게 있어야 오버레이가 선언한 imu@68 노드에 probe 가 붙는다. id_table
+ * 핵심: 이게 있어야 오버레이가 선언한 imu@68 노드에 probe 가 붙는다. id_table
  *   만으로는 DT 노드와 매칭되지 않으므로, 오버레이를 올려도 아무 일이 안
  *   일어난다. 반대로 이것만 있고 오버레이가 없으면 붙을 노드가 없다 —
  *   **둘이 짝이다.**
  *
- * ⚠️ compatible 에 표준 문자열("invensense,icm20948")을 쓰지 않는다. 커널
+ * 주의: compatible 에 표준 문자열("invensense,icm20948")을 쓰지 않는다. 커널
  *   내장 inv-mpu6050 계열이 ICM-20948 도 물고 있어 어느 쪽이 바인딩될지
  *   경합한다. 아래 driver.name 을 고유하게 둔 것과 같은 이유다. */
 static const struct of_device_id icm20948_of_match[] = {
@@ -354,7 +363,7 @@ static int __init imu_init(void)
         return PTR_ERR(imu_class);
     }
 
-    /* ⚠️ device_create() **전에** 달아야 한다. 노드는 device_create 시점에
+    /* 주의: device_create() **전에** 달아야 한다. 노드는 device_create 시점에
      *   만들어지므로, 그 뒤에 콜백을 붙이면 이미 만들어진 노드의 권한은
      *   그대로 0600 으로 남는다. */
     imu_class->devnode = imu_devnode;
@@ -412,7 +421,7 @@ MODULE_DESCRIPTION("ICM-20948 Level Detection Driver");
 //# 5. 칩 주소 실측 (이 보드는 0x69. 0x68 이면 AD0 가 L 인 보드다)
 //i2cdetect -y 1
 //
-//# ⚠️ 순서 주의: DT 노드가 먼저 있어야 insmod 때 매칭된다. 오버레이를
+//# 주의: 순서 DT 노드가 먼저 있어야 insmod 때 매칭된다. 오버레이를
 //#   나중에 올리면 compatible 속성만 바뀔 뿐 **재매칭이 안 일어나** probe 가
 //#   조용히 안 불린다. config.txt 로 부팅에 걸어두는 쪽이 확실하다.
 //Roll: 좌우 기울기, Pitch: 상하 기울기

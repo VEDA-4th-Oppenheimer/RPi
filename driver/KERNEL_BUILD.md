@@ -23,7 +23,7 @@
 | **드라이버 소스와 일치** | 커널 **6.10부터 serdev `receive_buf` 반환형이 `int → size_t`로 변경**됨. 현재 `turret_driver.c`는 `size_t` 기준 → 6.12에서 **소스 수정 0** |
 | **RPi OS ↔ Yocto 정렬** | 최신 RPi OS(Bookworm) 및 최신 Yocto(Styhead/Walnascar)의 `linux-raspberrypi`가 6.12 → 지금 검증한 게 Yocto 이관 후에도 유효 |
 
-### ⚠️ 6.6 LTS 주의
+### 주의: 6.6 LTS 주의
 6.6도 LTS지만 `receive_buf`가 아직 **`int` 시그니처**라, 현재 드라이버를 그대로 쓰면 **컴파일 에러**가 난다.
 6.6으로 가려면 드라이버를 `int` 반환형으로 되돌리거나, 아래 §4 버전 가드를 반드시 적용해야 한다.
 (참고: Yocto 4년 LTS인 Scarthgap이 6.6을 사용)
@@ -64,7 +64,7 @@ sudo apt-mark hold raspberrypi-kernel raspberrypi-kernel-headers  # apt upgrade 
 
 `vmlinux`(커널 본체)나 수백 개 다른 모듈은 **안 만들어도 된다**.
 
-### ✅ 방법 A — Pi 네이티브 빌드 (권장, 커널 빌드 0)
+###  방법 A — Pi 네이티브 빌드 (권장, 커널 빌드 0)
 
 ```bash
 sudo apt install raspberrypi-kernel-headers    # 이미 준비된 트리 제공
@@ -76,7 +76,7 @@ make                                           # /lib/modules/$(uname -r)/build 
   준비된 트리를 `/lib/modules/$(uname -r)/build`에 설치한다.
 - 커널을 **한 번도 빌드하지 않고** `.ko`가 나오며, 심볼 CRC가 실행 커널과 자동 일치 → `insmod` 바로 됨.
 
-### ⚙️ 방법 B — 호스트 크로스컴파일 (속도용, 준비 필요)
+###  방법 B — 호스트 크로스컴파일 (속도용, 준비 필요)
 
 크로스는 headers의 scripts가 arm64 바이너리라 x86 호스트에서 못 돈다. 따라서 **소스가 필요**하다.
 
@@ -134,9 +134,9 @@ Yocto(meta-raspberrypi)는 `linux-raspberrypi` 레시피로 **커널을 소스�
 → 지금의 vermagic/Module.symvers 매칭 문제가 **원천적으로 사라진다.**
 
 ### 지금 해둘 것 (Yocto 이관 대비)
-- 커널 모듈 Makefile을 `KDIR ?=` + `obj-m` + `$(MAKE) -C $(KDIR) M=$(PWD)` 형태로 유지 → `module.bbclass`가 그대로 호출 (✅ 현재 충족)
-- `.dts` 오버레이 소스 유지 (✅ `overlays/*-overlay.dts`)
-- `MODULE_LICENSE("GPL")` 명시 (✅)
+- 커널 모듈 Makefile을 `KDIR ?=` + `obj-m` + `$(MAKE) -C $(KDIR) M=$(PWD)` 형태로 유지 → `module.bbclass`가 그대로 호출 ( 현재 충족)
+- `.dts` 오버레이 소스 유지 ( `overlays/*-overlay.dts`)
+- `MODULE_LICENSE("GPL")` 명시 ()
 - **검증한 커널 버전 기록** → Yocto `PREFERRED_VERSION_linux-raspberrypi`를 그에 맞춰 재현
 - 런타임/빌드 의존성 목록화 → Yocto `DEPENDS`/`IMAGE_INSTALL`로 직행
 

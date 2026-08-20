@@ -9,7 +9,7 @@
  *   - 스위치_scan_start: BCM 23 / Pin 16 (Active Low, pull-up)
  *   - 스위치_ems       : BCM 24 / Pin 18 (Active Low, pull-up)
  *
- * ⚠️ 아래 brcm,pins 와 gpios-* 는 **BCM 번호**다. 물리 핀 번호를 쓰면 엉뚱한
+ * 주의: 아래 brcm,pins 와 gpios-* 는 **BCM 번호**다. 물리 핀 번호를 쓰면 엉뚱한
  *   핀이 잡힌다. 드라이버(led_sw_driver.c)의 모듈 파라미터 기본값과 반드시
  *   같아야 한다 — 오버레이가 이기므로 어긋나면 드라이버 쪽이 조용히 무시된다.
  *

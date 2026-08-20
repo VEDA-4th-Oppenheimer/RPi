@@ -8,11 +8,11 @@
 
 ---
 
-## 📂 디렉토리 구조
+##  디렉토리 구조
 
 ```
 .
-├── shared/                  # ★ 통신 계약 (single source of truth)
+├── shared/                  # 핵심: 통신 계약 (single source of truth)
 │   ├── protocol.h           #   RPi↔STM32 UART 규약 — 이 파일이 마스터.
 │   │                        #   STM32 repo 가 drift-check 로 이걸 대조함.
 │   └── daemon_module.h      #   데몬 코어 ↔ 모듈 계약
@@ -29,7 +29,7 @@
 │   └── modules/
 │       ├── mqtt/            #   브로커 연동 (이현우 + 이광진)
 │       ├── imu/             #   /dev/imu (ICM-20948) 수평 기준 (송영빈)
-│       └── led/             #   ⏳ STUB — /dev/led 미구현
+│       └── led/             #    STUB — /dev/led 미구현
 │
 ├── broker/                  # Mosquitto 설정·인증서 발급 (이광진)
 │   ├── gen-certs.sh         #   CA/서버/클라이언트 인증서
@@ -42,8 +42,6 @@
 │
 ├── docker/                  # 컨테이너 빌드 (macOS 에서 리눅스 전용 API 빌드용)
 │
-├── vision/                  # CLAHE/샤프닝 이미지 보정 (⏳ 이영민)
-│
 ├── tools/                   # 정적분석 설정
 │   ├── cppcheck_suppressions.txt
 │   └── run_static_analysis.sh
@@ -52,7 +50,7 @@
 
 ---
 
-## 🔗 protocol.h — 이 repo 가 마스터
+##  protocol.h — 이 repo 가 마스터
 
 `shared/protocol.h` 는 **RPi↔STM32 통신 계약의 단일 원본**이다.
 - **드라이버는 사본 없이 `../shared/protocol.h` 를 직접 include** (Makefile 경로 설정).
@@ -61,7 +59,7 @@
 
 ---
 
-## 🔨 빌드
+##  빌드
 
 ### 커널 드라이버 (driver/)
 ```bash
@@ -77,7 +75,7 @@ make dtbo
 # 적재
 sudo insmod turret_driver.ko
 ```
-⚠️ `.ko` vermagic 이 실행 커널과 맞아야 함 → 커널 소스를 `rpi-6.12.y` 로 정렬 (KERNEL_BUILD.md).
+주의: `.ko` vermagic 이 실행 커널과 맞아야 함 → 커널 소스를 `rpi-6.12.y` 로 정렬 (KERNEL_BUILD.md).
 
 ### 통합 데몬 (daemon/)
 
@@ -88,12 +86,12 @@ cmake --build daemon/build
 sudo ./daemon/build/adts_daemon          # 인자 없이 = 상주, MQTT 트리거 대기
 ```
 
-⚠️ `libmosquitto-dev`/`libcjson-dev` 가 없으면 **에러 없이 MQTT 를 비활성으로**
+주의: `libmosquitto-dev`/`libcjson-dev` 가 없으면 **에러 없이 MQTT 를 비활성으로**
 빌드한다(경고만 뜨고 넘어감). 데몬은 뜨지만 브로커에 붙지 않는다. 빌드 로그에
 `libmosquitto/libcjson 를 찾지 못해 MQTT 를 비활성으로 빌드합니다` 가 보이면
 의존성부터 설치할 것.
 
-⚠️ `sudo` 가 필요하다. 데몬이 읽는 `/etc/adts/certs/daemon.key` 가 `0600 root:root`
+주의: `sudo` 가 필요하다. 데몬이 읽는 `/etc/adts/certs/daemon.key` 가 `0600 root:root`
 라서 일반 계정으로 실행하면 TLS 접속이 실패한다.
 
 CLI 로 1회 스캔만 돌리려면 `--scan` 을 쓴다 (`--help` 참고):
@@ -104,7 +102,7 @@ sudo ./daemon/build/adts_daemon --scan 0 1790 -900 900 10 --height 2400 --once
 
 ---
 
-## 🔐 MQTT 브로커 · 인증서
+##  MQTT 브로커 · 인증서
 
 브로커(Mosquitto)는 **RPi 에 상주**하고 데몬·Qt 관제·카메라가 모두 이 브로커의
 클라이언트다. 포트 8883 + mTLS 이며, 권한은 **인증서 CN** 으로 판정한다
@@ -262,7 +260,7 @@ sudo bash broker/gen-certs.sh --revoke youngbin      # 미사용 토큰 회수
 `--list-tokens` 는 토큰 앞뒤 몇 글자만 보여준다. 전문을 찍으면 화면·터미널 로그에
 남는 것 자체가 접근 권한이 된다.
 
-⚠️ `--revoke` 는 **아직 안 쓴 토큰만** 회수한다. 이미 발급받아 간 인증서는 그대로
+주의: `--revoke` 는 **아직 안 쓴 토큰만** 회수한다. 이미 발급받아 간 인증서는 그대로
 유효하므로, 그 사람의 접근을 끊으려면 ACL 에서 `user qt-console-<라벨>` 블록을
 지우고 reload 해야 한다(아래 "로그아웃 · 접근 차단" 참고).
 
@@ -308,7 +306,7 @@ mosquitto_sub -h <RPi_IP> -p 8883 \
 
 ---
 
-## 🛡️ 정적분석 (push 전 로컬 검사)
+##  정적분석 (push 전 로컬 검사)
 
 ```bash
 bash tools/run_static_analysis.sh      # repo 루트에서
@@ -319,16 +317,15 @@ bash tools/run_static_analysis.sh      # repo 루트에서
 
 ---
 
-## 👥 소유권 (CODEOWNERS)
+##  소유권 (CODEOWNERS)
 
 | 경로 | 담당 |
 |---|---|
 | `shared/`, `driver/`, `daemon/core/` | 이현우 |
 | `daemon/modules/mqtt/` | 이현우 + 이광진 |
 | `daemon/modules/imu/` | 송영빈 |
-| `daemon/modules/led/` | 이현우 (⏳ STUB) |
+| `daemon/modules/led/` | 이현우 ( STUB) |
 | `broker/` | 이광진 |
-| `vision/` | 이영민 |
 | `tools/`, `.github/` | 강유근 (QA) |
 
 GitHub 핸들은 `CODEOWNERS` 참조. 다섯 명 모두 저장소 협업자라 PR 리뷰어가
@@ -336,7 +333,7 @@ GitHub 핸들은 `CODEOWNERS` 참조. 다섯 명 모두 저장소 협업자라 P
 
 ---
 
-## ⚠️ 주의
+## 주의: 주의
 - `protocol.h` 변경 = **여기(마스터) 먼저** → STM32 사본 동기화 (drift-check 가 강제).
 - `*.ko`·`build/`·`compile_commands.json` 커밋 금지 (`.gitignore` 처리됨).
 - 커널 버전은 **6.12.y 고정** (재현성·vermagic).

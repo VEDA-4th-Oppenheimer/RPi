@@ -35,13 +35,13 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "driver" ]; then
   echo "==> [driver] cppcheck 구동 중..."
   if command -v cppcheck &> /dev/null; then
     if ! cppcheck "${CPPCHECK_COMMON[@]}" -I shared -I driver driver/; then
-      echo "❌ [driver] cppcheck 위반 발견"
+      echo " [driver] cppcheck 위반 발견"
       EXIT_CODE=1
     else
-      echo "✅ [driver] cppcheck 통과!"
+      echo " [driver] cppcheck 통과!"
     fi
   else
-    echo "⚠️ cppcheck 미설치 — 드라이버 분석 건너뜀"
+    echo "주의: cppcheck 미설치 — 드라이버 분석 건너뜀"
     if [ "${TARGET}" = "driver" ]; then EXIT_CODE=1; fi
   fi
 fi
@@ -56,7 +56,7 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "daemon" ]; then
   if [ ! -f "daemon/build/compile_commands.json" ]; then
     echo "ℹ️ compile_commands.json 없음 — CMake 구성 자동 실행..."
     if ! cmake -S daemon -B daemon/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON &> /dev/null; then
-      echo "❌ [daemon] CMake 구성(Generate) 실패"
+      echo " [daemon] CMake 구성(Generate) 실패"
       EXIT_CODE=1
     fi
   fi
@@ -66,17 +66,17 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "daemon" ]; then
       echo "==> [daemon] cppcheck 분석 구동 중..."
       if ! cppcheck "${CPPCHECK_COMMON[@]}" \
         --project=daemon/build/compile_commands.json; then
-        echo "❌ [daemon] cppcheck 위반 발견"
+        echo " [daemon] cppcheck 위반 발견"
         EXIT_CODE=1
       else
-        echo "✅ [daemon] cppcheck 통과!"
+        echo " [daemon] cppcheck 통과!"
       fi
     else
-      echo "⚠️ cppcheck 미설치 — 데몬 분석 건너뜀"
+      echo "주의: cppcheck 미설치 — 데몬 분석 건너뜀"
       if [ "${TARGET}" = "daemon" ]; then EXIT_CODE=1; fi
     fi
   else
-    echo "❌ [daemon] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
+    echo " [daemon] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
     EXIT_CODE=1
   fi
 fi
@@ -91,7 +91,7 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "broker" ]; then
   if [ ! -f "broker/build/compile_commands.json" ]; then
     echo "ℹ️ compile_commands.json 없음 — CMake 구성 자동 실행..."
     if ! cmake -S broker -B broker/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON &> /dev/null; then
-      echo "❌ [broker] CMake 구성(Generate) 실패 — libssl-dev/libcjson-dev 설치 확인"
+      echo " [broker] CMake 구성(Generate) 실패 — libssl-dev/libcjson-dev 설치 확인"
       EXIT_CODE=1
     fi
   fi
@@ -101,17 +101,17 @@ if [ "${TARGET}" = "all" ] || [ "${TARGET}" = "broker" ]; then
       echo "==> [broker] cppcheck 분석 구동 중..."
       if ! cppcheck "${CPPCHECK_COMMON[@]}" \
         --project=broker/build/compile_commands.json; then
-        echo "❌ [broker] cppcheck 위반 발견"
+        echo " [broker] cppcheck 위반 발견"
         EXIT_CODE=1
       else
-        echo "✅ [broker] cppcheck 통과!"
+        echo " [broker] cppcheck 통과!"
       fi
     else
-      echo "⚠️ cppcheck 미설치 — 발급 서비스 분석 건너뜀"
+      echo "주의: cppcheck 미설치 — 발급 서비스 분석 건너뜀"
       if [ "${TARGET}" = "broker" ]; then EXIT_CODE=1; fi
     fi
   else
-    echo "❌ [broker] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
+    echo " [broker] 컴파일 DB(compile_commands.json) 유실 — 분석 불가"
     EXIT_CODE=1
   fi
 fi
@@ -119,9 +119,9 @@ fi
 # ── [최종 보고] ──
 echo "=================================================="
 if [ ${EXIT_CODE} -eq 0 ]; then
-  echo "==> 🎉 모든 레이어 정적분석 통과!"
+  echo "==>  모든 레이어 정적분석 통과!"
   exit 0
 else
-  echo "==> ❌ 일부 정적분석 단계에서 결함 검출. 위 로그 확인 후 조치하십시오."
+  echo "==>  일부 정적분석 단계에서 결함 검출. 위 로그 확인 후 조치하십시오."
   exit 1
 fi

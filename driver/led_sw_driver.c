@@ -13,7 +13,7 @@
  *    - 스위치_scan_start : CMD_SCAN_START     BCM 23 / Pin 16 (폴링)
  *    - 스위치_ems        : CMD_DISARM         BCM 24 / Pin 18 (폴링)
  *
- *  ⚠️ BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
+ *  주의: BCM 번호와 물리 핀 번호는 다르다. BCM17=Pin11 / BCM27=Pin13 / BCM22=Pin15.
  *    이 주석이 아래 모듈 파라미터 기본값과 어긋난 적이 있다(초록·노랑·빨강이
  *    전부 다르게 적혀 있었다). 배선하는 사람이 여기만 보고 꽂으면 LED 자리가
  *    바뀌므로, 핀을 옮기면 **이 표 / 모듈 파라미터 / 오버레이 / led_sw_test
@@ -100,6 +100,14 @@ MODULE_PARM_DESC(gpio_ems, "GPIO pin for EMS Switch (default: 24)");
 #define BUZZER_PWM_PERIOD_NS 500000UL /* 500us = 2kHz */
 #define BUZZER_PWM_DUTY_NS 250000UL   /* 250us = 50% duty */
 
+/* gpio_owned 비트 — 어느 핀을 우리가 실제로 쥐고 있는가 */
+#define OWN_BUZZER     BIT(0)
+#define OWN_LED_GREEN  BIT(1)
+#define OWN_LED_YELLOW BIT(2)
+#define OWN_LED_RED    BIT(3)
+#define OWN_SW_SCAN    BIT(4)
+#define OWN_SW_EMS     BIT(5)
+
 struct led_sw_dev {
   struct miscdevice misc;
   struct mutex lock;
@@ -123,6 +131,14 @@ struct led_sw_dev {
   u8 led_state[LED_MAX];
   u8 sw_state[SW_MAX];
   bool misc_registered;
+
+  /* gpio_request 에 **실제로 성공한** 핀만 표시한다.
+   *
+   * 주의: 이게 없으면 teardown 이 gpio_is_valid(pin) 만 보고 해제하는데, 핀
+   *   번호는 DT 파싱 시점에 이미 유효하므로 probe 가 중간에 실패하면 요청한
+   *   적 없는 핀까지 놓게 된다. 커널이 WARN_ON 을 띄우고, 그 핀을 다른
+   *   드라이버가 쥐고 있었다면 그쪽 소유를 빼앗는다. */
+  u32 gpio_owned;
 
   /* 이벤트 FIFO (read/poll) */
   DECLARE_KFIFO(fifo, struct led_sw_event, EVENT_FIFO_SIZE);
@@ -189,7 +205,7 @@ static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
     } else {
       pwm_disable(dev->pwm_buzzer);
     }
-  } else if (gpio_is_valid(dev->pin_buzzer)) {
+  } else if ((dev->gpio_owned & OWN_BUZZER) && gpio_is_valid(dev->pin_buzzer)) {
     gpio_set_value(dev->pin_buzzer, on ? 1 : 0);
   }
 }
@@ -199,17 +215,21 @@ static void set_buzzer_hw_pwm(struct led_sw_dev *dev, u8 on) {
  * ------------------------------------------------------------------------- */
 static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on) {
   int pin = -1;
+  u32 own = 0;
   on = !!on;
 
   switch (ch) {
   case LED_GREEN:
     pin = dev->pin_led_green;
+    own = OWN_LED_GREEN;
     break;
   case LED_YELLOW:
     pin = dev->pin_led_yellow;
+    own = OWN_LED_YELLOW;
     break;
   case LED_RED:
     pin = dev->pin_led_red;
+    own = OWN_LED_RED;
     break;
   case LED_BUZZER:
     if (on != dev->led_state[LED_BUZZER]) {
@@ -221,7 +241,10 @@ static void set_led_hw(struct led_sw_dev *dev, enum led_channel ch, u8 on) {
     return;
   }
 
-  if (gpio_is_valid(pin)) {
+  /* 주의: 핀 번호가 유효한 것과 그 핀을 우리가 쥔 것은 다르다. 요청이
+   *   실패해도 probe 가 계속되는 경로가 있어(부저), 소유를 안 보면 남의
+   *   핀이나 미요청 핀에 값을 쓰게 된다. */
+  if ((dev->gpio_owned & own) && gpio_is_valid(pin)) {
     gpio_set_value(pin, on);
     dev->led_state[ch] = on;
   }
@@ -365,14 +388,14 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
 
   ret = gpio_request_one(pin, flags, label);
 
-  /* ⚠️ -EPROBE_DEFER 는 여기서 되돌리지 않는다.
+  /* 주의: -EPROBE_DEFER 는 여기서 되돌리지 않는다.
    *
    *   그 코드의 뜻은 "내가 기대는 리소스(gpiochip 등)가 아직 준비되지
    *   않았으니 **나중에 다시 불러 달라**" 이다. 즉시 재요청해도 상황이
    *   바뀔 리가 없고, 오히려 커널이 준비된 뒤 probe 를 다시 불러줄
    *   기회를 없애 deferral 자체를 무력화한다. 그대로 올려보낸다.
    *
-   * ⚠️ -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
+   * 주의: -EBUSY 에서 gpio_free 로 되찾는 것은 남겨둔다. 실기에서 실제로
    *   필요했던 우회이고, 재현할 보드 없이 빼면 probe 가 실패할 수 있다.
    *   다만 이건 **남이 쥔 GPIO 를 강제로 뺏는** 동작이라 안전하지 않다.
    *   원인 후보:
@@ -381,11 +404,24 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
    *         -EBUSY 가 아직도 나는지 다시 볼 것)
    *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
    *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
-  if (ret == -EBUSY) {
-    pr_warn("led_sw: gpio %d busy — 강제 회수 후 재시도 (%s)\n", pin, label);
+  if (ret == -EBUSY || ret == -EPROBE_DEFER) {
+    pr_warn("led_sw: gpio %d 첫 요청 실패(%d) — 회수 후 재시도 (%s)\n", pin, ret,
+            label);
     gpio_free(pin);
     ret = gpio_request_one(pin, flags, label);
+
+    /* 재시도도 defer 면 그건 진짜 "아직 준비 안 됐다" 이므로 그대로 올린다.
+     * 여기서 삼키면 커널이 나중에 probe 를 다시 불러줄 기회를 없앤다. */
   }
+  return ret;
+}
+
+/* request_gpio_safe + 소유 표시. 성공한 핀만 teardown 이 해제한다. */
+static int claim_gpio(int pin, unsigned long flags, const char *label, u32 bit) {
+  const int ret = request_gpio_safe(pin, flags, label);
+
+  if (ret == 0)
+    g_led_sw->gpio_owned |= bit;
   return ret;
 }
 
@@ -400,7 +436,7 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
  * 여기에 misc_deregister 를 넣으면 실패 경로가 등록도 안 된 걸 해제하려 들고,
  * 빼면 remove 경로에서 문자 디바이스가 남는다. 그래서 **호출자가** 책임진다.
  *
- * ⚠️ 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
+ * 주의: 남겨두면 어떻게 되나: rmmod 로 g_led_sw(devm 할당)가 해제된 뒤에도
  *   /dev/led_sw 가 등록된 채라 fops 가 사라진 모듈을 가리킨다. 누가 열면
  *   use-after-free 다. 재적재 시 같은 이름으로 misc_register 가 또 불려
  *   실패할 수도 있다. */
@@ -427,18 +463,22 @@ static void led_sw_teardown(void) {
       g_led_sw->pwm_buzzer = NULL;
     }
 
-    if (gpio_is_valid(g_led_sw->pin_sw_ems))
+    /* 주의: gpio_is_valid 가 아니라 **소유 비트**를 본다. 핀 번호는 DT 를 읽은
+     *   순간 유효해지므로, 그것만 보면 요청이 실패했거나 아직 요청하지 않은
+     *   핀까지 해제하게 된다(WARN_ON, 그리고 남이 쥔 핀이면 그쪽 소유 파괴). */
+    if (g_led_sw->gpio_owned & OWN_SW_EMS)
       gpio_free(g_led_sw->pin_sw_ems);
-    if (gpio_is_valid(g_led_sw->pin_sw_scan_start))
+    if (g_led_sw->gpio_owned & OWN_SW_SCAN)
       gpio_free(g_led_sw->pin_sw_scan_start);
-    if (gpio_is_valid(g_led_sw->pin_buzzer))
+    if (g_led_sw->gpio_owned & OWN_BUZZER)
       gpio_free(g_led_sw->pin_buzzer);
-    if (gpio_is_valid(g_led_sw->pin_led_red))
+    if (g_led_sw->gpio_owned & OWN_LED_RED)
       gpio_free(g_led_sw->pin_led_red);
-    if (gpio_is_valid(g_led_sw->pin_led_yellow))
+    if (g_led_sw->gpio_owned & OWN_LED_YELLOW)
       gpio_free(g_led_sw->pin_led_yellow);
-    if (gpio_is_valid(g_led_sw->pin_led_green))
+    if (g_led_sw->gpio_owned & OWN_LED_GREEN)
       gpio_free(g_led_sw->pin_led_green);
+    g_led_sw->gpio_owned = 0;
 
     g_led_sw = NULL;
   }
@@ -468,31 +508,47 @@ static int led_sw_probe(struct platform_device *pdev) {
   g_led_sw->pin_sw_ems = gpio_ems;
 
   if (np) {
-    int gpio_tmp;
+    static const struct {
+      const char *prop;
+      size_t      off;
+    } dt_pins[] = {
+      { "gpios-led-green",     offsetof(struct led_sw_dev, pin_led_green)     },
+      { "gpios-led-yellow",    offsetof(struct led_sw_dev, pin_led_yellow)    },
+      { "gpios-led-red",       offsetof(struct led_sw_dev, pin_led_red)       },
+      { "gpios-sw-scan-start", offsetof(struct led_sw_dev, pin_sw_scan_start) },
+      { "gpios-sw-ems",        offsetof(struct led_sw_dev, pin_sw_ems)        },
+      { "gpios-buzzer",        offsetof(struct led_sw_dev, pin_buzzer)        },
+    };
+    size_t i;
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-green", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_green = gpio_tmp;
+    for (i = 0; i < ARRAY_SIZE(dt_pins); i++) {
+      const int gpio_tmp = of_get_named_gpio(np, dt_pins[i].prop, 0);
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-yellow", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_yellow = gpio_tmp;
+      if (gpio_tmp >= 0) {
+        *(int *)((char *)g_led_sw + dt_pins[i].off) = gpio_tmp;
+        continue;
+      }
 
-    gpio_tmp = of_get_named_gpio(np, "gpios-led-red", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_led_red = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-sw-scan-start", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_sw_scan_start = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-sw-ems", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_sw_ems = gpio_tmp;
-
-    gpio_tmp = of_get_named_gpio(np, "gpios-buzzer", 0);
-    if (gpio_tmp >= 0)
-      g_led_sw->pin_buzzer = gpio_tmp;
+      /* 주의: -EPROBE_DEFER 를 여기서 삼키면 안 된다. 예전 코드는
+       *   `if (gpio_tmp >= 0)` 하나로 모든 실패를 "DT 에 값이 없다" 로 보고
+       *   모듈 파라미터 기본값(17, 27, ...)으로 떨어졌는데, **그 번호로는
+       *   절대 성공할 수 없다.** 이 커널의 gpiochip base 가 512 라서
+       *   BCM 17 의 전역 번호는 529 이고, 전역 17 은 어느 칩에도 속하지
+       *   않아 gpio_request_one() 이 다시 -EPROBE_DEFER 를 낸다. 즉 한 번의
+       *   유예를 영구 실패로 바꿔놓고 그 사실을 로그로도 안 남겼다
+       *   (실측: 부팅 6.7초에 이미 이 경로를 타고 있었다).
+       *
+       *   DT 노드가 있으면 DT 가 유일한 진실이다. 유예는 그대로 올려보내
+       *   커널이 다시 부르게 하고, 그 외 오류는 실패로 끝낸다. */
+      if (gpio_tmp == -EPROBE_DEFER) {
+        pr_info("led_sw: %s — gpio 컨트롤러 준비 대기(재시도 예정)\n",
+                dt_pins[i].prop);
+      } else {
+        pr_err("led_sw: %s 해석 실패: %d\n", dt_pins[i].prop, gpio_tmp);
+      }
+      g_led_sw = NULL;   /* devm 이 회수하므로 포인터를 남기면 안 된다 */
+      return gpio_tmp;
+    }
   }
 
 	/* 수동 부저용 하드웨어 PWM 장치 요청 (CPU 점유율 0%).
@@ -504,6 +560,17 @@ static int led_sw_probe(struct platform_device *pdev) {
 
 		g_led_sw->pwm_buzzer = NULL;
 		if (perr == -EPROBE_DEFER) {
+			/* 주의: 전역 포인터를 반드시 비우고 나간다. devm_kzalloc 으로 받은
+			 *   메모리는 probe 가 실패하면 **커널이 회수한다**. 포인터만
+			 *   남겨두면 재probe 가 맨 위의 "이미 초기화됨" 검사에 걸려
+			 *   아무것도 안 하고 0 을 반환하고, 이후 접근은 해제된 메모리를
+			 *   건드린다(use-after-free).
+			 *
+			 *   led_sw_teardown() 을 부르지 않는 이유: 이 지점까지 잡은
+			 *   자원이 없다. GPIO 요청·타이머·kthread·misc 등록이 전부
+			 *   아래에 있어서, teardown 을 부르면 초기화된 적 없는 타이머를
+			 *   del_timer_sync 하고 요청한 적 없는 핀에 값을 쓰게 된다. */
+			g_led_sw = NULL;
 			return perr;
 		}
 		pr_info("led_sw: hardware PWM 없음 (%d) — GPIO 폴백\n", perr);
@@ -513,7 +580,8 @@ static int led_sw_probe(struct platform_device *pdev) {
     pr_info("led_sw: Hardware PWM initialized for buzzer (2kHz)\n");
   } else {
     /* Hardware PWM 미사용 시에만 일반 GPIO 요청 */
-    ret = request_gpio_safe(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer");
+    ret = claim_gpio(g_led_sw->pin_buzzer, GPIOF_OUT_INIT_LOW, "buzzer",
+                     OWN_BUZZER);
     if (ret) {
       pr_warn("led_sw: gpio buzzer (%d) request warning: %d\n",
               g_led_sw->pin_buzzer, ret);
@@ -521,23 +589,24 @@ static int led_sw_probe(struct platform_device *pdev) {
   }
 
   /* GPIO 요청 - LED */
-  ret = request_gpio_safe(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW,
-                          "led_green");
+  ret = claim_gpio(g_led_sw->pin_led_green, GPIOF_OUT_INIT_LOW, "led_green",
+                    OWN_LED_GREEN);
   if (ret) {
     pr_err("led_sw: gpio green (%d) request failed: %d\n",
            g_led_sw->pin_led_green, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW,
-                          "led_yellow");
+  ret = claim_gpio(g_led_sw->pin_led_yellow, GPIOF_OUT_INIT_LOW, "led_yellow",
+                    OWN_LED_YELLOW);
   if (ret) {
     pr_err("led_sw: gpio yellow (%d) request failed: %d\n",
            g_led_sw->pin_led_yellow, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red");
+  ret = claim_gpio(g_led_sw->pin_led_red, GPIOF_OUT_INIT_LOW, "led_red",
+                    OWN_LED_RED);
   if (ret) {
     pr_err("led_sw: gpio red (%d) request failed: %d\n", g_led_sw->pin_led_red,
            ret);
@@ -546,14 +615,15 @@ static int led_sw_probe(struct platform_device *pdev) {
 
   /* GPIO 요청 - Switches */
   ret =
-      request_gpio_safe(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start");
+      claim_gpio(g_led_sw->pin_sw_scan_start, GPIOF_IN, "sw_scan_start",
+                    OWN_SW_SCAN);
   if (ret) {
     pr_err("led_sw: gpio scan_start (%d) request failed: %d\n",
            g_led_sw->pin_sw_scan_start, ret);
     goto err_teardown;
   }
 
-  ret = request_gpio_safe(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems");
+  ret = claim_gpio(g_led_sw->pin_sw_ems, GPIOF_IN, "sw_ems", OWN_SW_EMS);
   if (ret) {
     pr_err("led_sw: gpio ems (%d) request failed: %d\n", g_led_sw->pin_sw_ems,
            ret);

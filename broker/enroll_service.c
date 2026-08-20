@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -61,6 +62,10 @@
 #define DEF_SCAN_DIR    "/var/lib/adts/scans"
 #define DEF_BIND_PORT   8443
 #define DEF_MQTT_PORT   8883
+
+/* 한 연결이 붙잡고 있을 수 있는 최대 시간(읽기/쓰기 각각). 단일 스레드라
+ * 이 값이 그대로 "서비스 전체가 멈출 수 있는 시간" 이다. */
+#define CLIENT_TIMEOUT_S 20
 
 #define MAX_HEADER      8192u
 #define MAX_BODY        8192u
@@ -149,7 +154,17 @@ static char *read_file(const char *path, size_t limit)
  * 비교는 CRYPTO_memcmp 로 한다 — 비교에 걸리는 시간으로 토큰을 알아내는 것을
  * 막기 위해서다.
  * ---------------------------------------------------------------------- */
-static bool consume_token(const char *token, char *label_out, size_t label_sz)
+/* 토큰을 찾고, commit 이 true 면 파일에서 지운다(=소비).
+ *
+ * 주의: 검증과 소비를 나눈 이유 — 예전에는 찾자마자 지우고 그 뒤에 인증서를
+ *   발급했다. 발급이나 ACL 갱신이 실패하면 사용자는 아무것도 못 받았는데
+ *   토큰만 사라져서, 관리자가 새 토큰을 발급해 주기 전까지 재시도할 방법이
+ *   없었다. 이제 발급이 다 끝난 뒤에 소비한다.
+ *
+ *   이 서비스는 단일 스레드 accept 루프라 검사-후-소비 사이에 다른 요청이
+ *   끼어들 수 없다. 나중에 동시 처리를 넣는다면 이 가정이 깨진다. */
+static bool token_take(const char *token, char *label_out, size_t label_sz,
+                       bool commit)
 {
     char *body = read_file(g_token_file, 1u << 20);
     if (body == NULL) {
@@ -207,6 +222,12 @@ static bool consume_token(const char *token, char *label_out, size_t label_sz)
 
     if (!matched) { (void)unlink(tmp_path); return false; }
 
+    if (!commit) {
+        /* 확인만 했다. 원본은 그대로 두고 임시본을 버린다. */
+        (void)unlink(tmp_path);
+        return true;
+    }
+
     (void)chmod(tmp_path, S_IRUSR | S_IWUSR);
     if (rename(tmp_path, g_token_file) != 0) {   /* 원자적 교체 */
         logmsg("ERROR", "토큰 파일 교체 실패: %s", strerror(errno));
@@ -249,7 +270,7 @@ static bool issue_cert(const char *cn, char **ca_pem, char **crt_pem, char **key
     (void)snprintf(ca_path,    sizeof ca_path,    "%s/ca.crt",       g_cert_dir);
 
     /* 재발급(로그아웃 후 재등록 등)이면 기존 파일을 지우고 새로 만든다.
-     * ⚠️ 이전 인증서는 파일을 지운다고 폐기되지 않는다 — 암호학적으로 여전히
+     * 주의: 이전 인증서는 파일을 지운다고 폐기되지 않는다 — 암호학적으로 여전히
      *    유효하다. 실제로 무효화하려면 브로커에 CRL 을 걸어야 한다. */
     if (access(crt_path, F_OK) == 0) {
         logmsg("WARN", "CN=%s 재발급 — 이전 인증서는 CRL 없이는 여전히 유효합니다", cn);
@@ -610,9 +631,9 @@ static void handle_request(SSL *ssl, const char *peer)
     }
     const char *device = cJSON_IsString(jdev) ? jdev->valuestring : "-";
 
-    /* ── 토큰 검증 및 소비 ── */
+    /* ── 토큰 검증 (소비는 발급이 다 끝난 뒤) ── */
     char label[MAX_LABEL] = {0};
-    if (!consume_token(jtok->valuestring, label, sizeof label)) {
+    if (!token_take(jtok->valuestring, label, sizeof label, false)) {
         /* 토큰이 틀렸는지 이미 썼는지 구분해 알려주지 않는다 — 추측을 돕지 않기 위해 */
         logmsg("WARN", "발급 거부: 토큰 불일치 또는 이미 사용됨 (device=%s, from=%s)",
                device, peer);
@@ -643,6 +664,16 @@ static void handle_request(SSL *ssl, const char *peer)
                    "ACL 갱신에 실패했습니다 — 발급은 됐으나 권한이 없습니다");
         cJSON_Delete(req);
         return;
+    }
+
+    /* 발급과 ACL 이 모두 끝난 지금에서야 토큰을 쓴다. 여기서 실패해도 사용자에게
+     * 인증서는 이미 나갔으므로 응답은 그대로 보내되, 토큰이 살아 있다는 뜻이라
+     * 관리자가 손으로 지울 수 있게 경고를 남긴다. */
+    char spent_label[MAX_LABEL] = {0};
+
+    if (!token_take(jtok->valuestring, spent_label, sizeof spent_label, true)) {
+        logmsg("WARN", "토큰 소비 실패 — 같은 토큰이 다시 쓰일 수 있습니다"
+                       " (label=%s, device=%s)", label, device);
     }
 
     /* ── 응답 조립 ── */
@@ -779,6 +810,23 @@ int main(void)
 
         char peer_ip[INET_ADDRSTRLEN] = "?";
         (void)inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof peer_ip);
+
+        /* 이 서비스는 단일 스레드 accept 루프다(동시 발급이 필요 없고, 그
+         * 단순함이 인증서를 다루는 코드에서는 장점이다). 대신 한 연결이
+         * 멈추면 **그동안 아무도 발급받지 못하고 스캔 다운로드도 막힌다.**
+         *
+         * 주의: 그래서 소켓 자체에 마감시간을 건다. 이게 없으면 접속만 하고
+         *   아무것도 안 보내는 클라이언트 하나로 서비스 전체가 정지한다
+         *   (SSL_accept 의 첫 read 에서 무한정 기다린다). 발급은 사람이
+         *   버튼을 누르는 대화형 작업이라 이 정도면 넉넉하다. */
+        {
+            struct timeval to;
+
+            memset(&to, 0, sizeof to);
+            to.tv_sec = CLIENT_TIMEOUT_S;
+            (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+            (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof to);
+        }
 
         SSL *ssl = SSL_new(ctx);
         if (ssl != NULL) {
