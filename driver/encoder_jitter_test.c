@@ -308,23 +308,7 @@ int main(int argc, char *argv[])
     int collected = 0;
 
     for (int i = 0; i < sample_count; i++) {
-        /* 엔코더 판독 요청 */
-        if (ioctl(fd, TURRET_HOME) < 0) {
-            perror("ioctl TURRET_HOME");
-            break;
-        }
-
-        /* STM32 응답 대기 (최대 100ms) */
-        int pr = poll(&pfd, 1, 100);
-        if (pr < 0) {
-            if (errno == EINTR) {
-                i--;
-                continue;
-            }
-            perror("poll");
-            break;
-        }
-
+        /* STM32 상태 읽기 (모터 구동 명령 일체 미전송) */
         struct turret_link_state s;
         if (ioctl(fd, TURRET_GET_STATE, &s) < 0) {
             perror("ioctl TURRET_GET_STATE");
@@ -335,12 +319,12 @@ int main(int argc, char *argv[])
         tilt_raws[collected] = s.home_tilt_encoder_raw;
         collected++;
 
-        printf("\r[샘플링 진행 %4d/%4d] Pan Raw=%5u (%6.2f°) | Tilt Raw=%5u (%6.2f°)",
+        printf("\r[샘플링 진행 %4d/%4d] Pan: %5u (각도 %6.1f°) | Tilt: %5u (각도 %6.1f°)",
                collected, sample_count,
                s.home_pan_encoder_raw,
-               (double)s.home_pan_encoder_raw * DEG_PER_LSB,
+               (double)s.cur_pan_ddeg / 10.0,
                s.home_tilt_encoder_raw,
-               (double)s.home_tilt_encoder_raw * DEG_PER_LSB);
+               (double)s.cur_tilt_ddeg / 10.0);
         fflush(stdout);
 
         usleep((useconds_t)interval_ms * 1000);
