@@ -10,9 +10,9 @@
  *   gcc -O2 -Wall -Wextra -DPROTO_WANT_IOCTL -I../shared -o encoder_jitter_test encoder_jitter_test.c -lm
  *
  * [사용법]
- *   ./encoder_jitter_test [샘플수] [샘플링간격_ms]
- *   예) ./encoder_jitter_test 100 30    (100개 샘플, 30ms 주기 수집 - 기본값)
- *       ./encoder_jitter_test 300 20    (300개 샘플, 20ms 주기 수집)
+ *   ./encoder_jitter_test [샘플수] [샘플링간격_ms] [출력파일.md]
+ *   예) ./encoder_jitter_test 100 200               (100개 샘플, 200ms 주기 수집 - 기본값)
+ *       ./encoder_jitter_test 500 200 report.md     (500개 샘플 수집)
  */
 
 #include <stdio.h>
@@ -110,7 +110,7 @@ static void print_report(int count, int interval_ms,
 
     printf("[ 필터(Filter) 적용 필요성 분석 및 가이드 ]\n");
     if (max_pp <= 2 && max_std <= 0.8) {
-        printf(" [상태: 매우 우수 (Very Clean)]\n");
+        printf("✓ [상태: 매우 우수 (Very Clean)]\n");
         printf("  - 최대 지터 변동폭이 %u LSB (약 %.4f°) 이내로 매우 안정적입니다.\n", max_pp, max_pp * DEG_PER_LSB);
         printf("  - 결론: 추가적인 소프트웨어 필터(LPF)가 전혀 필요하지 않으며 원시값을 그대로 사용 가능합니다.\n");
     } else if (max_pp <= 6) {
@@ -120,7 +120,7 @@ static void print_report(int count, int interval_ms,
         printf("    * 권장 1: 4~8-Tap 이동평균 필터 (Moving Average Filter)\n");
         printf("    * 권장 2: 지수이동평균 필터 (EMA: y[k] = 0.25*x[k] + 0.75*y[k-1])\n");
     } else {
-        printf(" [상태: 지터 높음 (High Noise Warning)]\n");
+        printf("⚠ [상태: 지터 높음 (High Noise Warning)]\n");
         printf("  - 최대 지터 변동폭이 %u LSB (약 %.4f°)로 노이즈가 큽니다.\n", max_pp, max_pp * DEG_PER_LSB);
         printf("  - 하드웨어 점검: MT6701 센서와 자석 간의 거리(Air Gap 1.0~2.0mm) 및 자석 편심 확인 필요.\n");
         printf("  - 결론: 소프트웨어 필터 적용이 필수적입니다.\n");
@@ -212,24 +212,20 @@ static void save_markdown_report(const char *filepath, int count, int interval_m
 
 int main(int argc, char *argv[])
 {
-    int sample_count = 1000;
-    int interval_ms = 50;
-    bool free_mode = false;
+    int sample_count = 100;
+    int interval_ms = 200;
     char report_file[256] = {0};
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [samples] [interval_ms] [output_file.md] [--disarm]\n", argv[0]);
-            printf("  samples        : Number of samples to collect (default: 1000, min: 10)\n");
-            printf("  interval_ms    : Sampling interval in ms (default: 50, min: 20)\n");
+            printf("Usage: %s [samples] [interval_ms] [output_file.md]\n", argv[0]);
+            printf("  samples        : Number of samples to collect (default: 100, min: 10)\n");
+            printf("  interval_ms    : Sampling interval in ms (default: 200, min: 100)\n");
             printf("  output_file.md : Output markdown report path (default: auto-generated timestamp)\n");
-            printf("  --disarm       : Disable motor holding torque (Free-wheel mode, manual rotation)\n");
             return 0;
-        } else if (!strcmp(argv[i], "--disarm") || !strcmp(argv[i], "--free")) {
-            free_mode = true;
-        } else if (sample_count == 1000 && atoi(argv[i]) > 0 && i == 1) {
+        } else if (sample_count == 100 && atoi(argv[i]) > 0 && i == 1) {
             sample_count = atoi(argv[i]);
-        } else if (interval_ms == 50 && atoi(argv[i]) > 0 && i == 2) {
+        } else if (interval_ms == 200 && atoi(argv[i]) > 0 && i == 2) {
             interval_ms = atoi(argv[i]);
         } else if (report_file[0] == '\0' && strstr(argv[i], ".md")) {
             snprintf(report_file, sizeof(report_file), "%s", argv[i]);
@@ -243,7 +239,7 @@ int main(int argc, char *argv[])
     }
 
     if (sample_count < 10) sample_count = 10;
-    if (interval_ms < 20) interval_ms = 20;
+    if (interval_ms < 100) interval_ms = 100;
 
     int fd = open(DEV_TURRET, O_RDWR);
     if (fd < 0) {
@@ -265,7 +261,6 @@ int main(int argc, char *argv[])
     printf("===================================================================\n");
     printf(" [MT6701 홀 센서 정지상태 지터링 측정 도구 (노이즈 정밀 분석)]\n");
     printf(" - 대상 장치  : %s\n", DEV_TURRET);
-    printf(" - 동작 모드  : %s\n", free_mode ? "모터 락 해제 모드 (Free-wheel / DISARM)" : "모터 정지 유지 모드 (Holding Torque)");
     printf(" - 샘플 수    : %d 개\n", sample_count);
     printf(" - 샘플링주기 : %d ms (예상 소요시간: 약 %.1f 초)\n", interval_ms, (double)(sample_count * interval_ms) / 1000.0);
     printf(" - 결과 파일  : %s\n", report_file);
@@ -273,42 +268,43 @@ int main(int argc, char *argv[])
 
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
 
-    if (free_mode) {
-        printf("[준비] 모터 락 해제(DISARM) 명령 전송 중...\n");
-        if (ioctl(fd, TURRET_DISARM) < 0) {
-            perror("ioctl TURRET_DISARM");
-        }
-        usleep(500000); /* 0.5초 대기 */
-        printf("✓ 모터 락이 풀렸습니다 (Free-wheel 상태).\n");
-        printf("✓ 원하는 각도에 장비를 고정해 두세요. 2초 후 측정을 시작합니다...\n");
-        sleep(2);
-    } else {
-        printf("[1단계] 모터를 홈(0°) 위치로 이동 중입니다...\n");
-        if (ioctl(fd, TURRET_HOME) < 0) {
-            perror("ioctl TURRET_HOME");
-        }
-        /* 첫 홈 완료 통지 대기 */
-        (void)poll(&pfd, 1, 5000);
-
-        printf("-> 모터 홈 위치 도달 완료. 5초간 정착 대기 중...\n");
-        for (int sec = 5; sec > 0; sec--) {
-            printf("   [%d초 대기 중...]\n", sec);
-            sleep(1);
-        }
-
-        printf("[2단계] 모터 락 해제(DISARM) 명령 전송 중...\n");
-        if (ioctl(fd, TURRET_DISARM) < 0) {
-            perror("ioctl TURRET_DISARM");
-        }
-        usleep(500000); /* 0.5초 안정화 대기 */
-        printf("✓ 모터 락(전원)이 완전히 해제되었습니다 (Holding Torque = 0, 무전류/무진동 상태).\n");
-        printf("✓ 지금부터 완전 정지 상태의 순수 센서 지터 %d건 수집을 시작합니다.\n\n", sample_count);
+    printf("[1단계] 모터를 홈(0°) 위치로 1회 이동시킵니다...\n");
+    if (ioctl(fd, TURRET_HOME) < 0) {
+        perror("ioctl TURRET_HOME");
     }
+    /* 첫 홈 완료 통지 대기 */
+    printf("-> 모터 회전 및 홈 도달 대기 중...\n");
+    (void)poll(&pfd, 1, 5000);
+
+    /* 모터 물리적 이동 완료 후 잔여 진동이 완전히 멈출 때까지 3초간 정착 대기 */
+    printf("-> 모터 도달 완료. 잔여 기계적 진동이 멈출 때까지 3초간 정착 대기 중...\n");
+    for (int sec = 3; sec > 0; sec--) {
+        printf("   [%d초 대기 중...]\n", sec);
+        sleep(1);
+    }
+    printf("✓ 모터가 완벽한 정지 상태에 도달했습니다.\n");
+    printf("✓ 지금부터 14-bit 순수 엔코더 지터링 데이터 %d건 수집을 시작합니다.\n\n", sample_count);
 
     int collected = 0;
 
     for (int i = 0; i < sample_count; i++) {
-        /* STM32 상태 읽기 (모터 구동 명령 일체 미전송) */
+        /* 엔코더 판독 요청 */
+        if (ioctl(fd, TURRET_HOME) < 0) {
+            perror("ioctl TURRET_HOME");
+            break;
+        }
+
+        /* STM32 응답 대기 (최대 200ms) */
+        int pr = poll(&pfd, 1, 200);
+        if (pr < 0) {
+            if (errno == EINTR) {
+                i--;
+                continue;
+            }
+            perror("poll");
+            break;
+        }
+
         struct turret_link_state s;
         if (ioctl(fd, TURRET_GET_STATE, &s) < 0) {
             perror("ioctl TURRET_GET_STATE");
@@ -319,12 +315,12 @@ int main(int argc, char *argv[])
         tilt_raws[collected] = s.home_tilt_encoder_raw;
         collected++;
 
-        printf("\r[샘플링 진행 %4d/%4d] Pan: %5u (각도 %6.1f°) | Tilt: %5u (각도 %6.1f°)",
+        printf("\r[샘플링 진행 %4d/%4d] Pan Raw=%5u (%6.2f°) | Tilt Raw=%5u (%6.2f°)",
                collected, sample_count,
                s.home_pan_encoder_raw,
-               (double)s.cur_pan_ddeg / 10.0,
+               (double)s.home_pan_encoder_raw * DEG_PER_LSB,
                s.home_tilt_encoder_raw,
-               (double)s.cur_tilt_ddeg / 10.0);
+               (double)s.home_tilt_encoder_raw * DEG_PER_LSB);
         fflush(stdout);
 
         usleep((useconds_t)interval_ms * 1000);
