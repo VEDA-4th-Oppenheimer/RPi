@@ -279,17 +279,26 @@ int main(int argc, char *argv[])
             perror("ioctl TURRET_DISARM");
         }
         usleep(500000); /* 0.5초 대기 */
-        printf("✓ 모터 락이 풀렸습니다. 원하는 각도에 두고 측정을 진행합니다.\n\n");
+        printf("✓ 모터 락이 풀렸습니다 (Free-wheel 상태).\n");
+        printf("✓ 원하는 각도에 장비를 고정해 두세요. 2초 후 측정을 시작합니다...\n");
+        sleep(2);
     } else {
-        printf("[1단계] 최초 1회 홈 이동 및 정착(Settling) 진행 중...\n");
+        printf("[1단계] 최초 1회 홈(영점) 이동을 시작합니다...\n");
         if (ioctl(fd, TURRET_HOME) < 0) {
             perror("ioctl TURRET_HOME");
         }
-        /* 홈 완료 통지 대기 */
-        (void)poll(&pfd, 1, 2000);
-        printf("-> 모터 물리적 이동 완료. 잔여 진동 감쇠 대기 중 (1.5초)...\n");
-        usleep(1500000); /* 1.5초 정착 대기 */
-        printf("✓ 모터가 완전 정지 상태에 도달했습니다. 순수 센서 지터 측정을 시작합니다.\n\n");
+        /* 첫 홈 완료 통지 대기 */
+        printf("-> 모터가 홈 위치로 회전 중입니다. 도달 대기...\n");
+        (void)poll(&pfd, 1, 5000);
+
+        /* ★ 핵심: 모터 물리적 이동 완료 후 잔여 진동이 완전히 멈출 때까지 3초간 정착 대기 */
+        printf("-> 모터 이동 완료. 잔여 기계적 진동이 멈출 때까지 3초간 정착 대기 중...\n");
+        for (int sec = 3; sec > 0; sec--) {
+            printf("   [%d초 대기 중...]\n", sec);
+            sleep(1);
+        }
+        printf("✓ 모터가 완벽한 정지 상태에 도달했습니다!\n");
+        printf("✓ 지금부터 모터 이동 노이즈 없는 '순수 정지 상태 센서 지터' 1,000건 수집을 시작합니다.\n\n");
     }
 
     int collected = 0;
