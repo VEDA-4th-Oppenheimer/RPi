@@ -17,6 +17,7 @@ Module.symvers
 turret_test
 imu_test
 led_sw_test
+encoder_jitter_test
 adts_daemon*
 build/
 build-arm64/

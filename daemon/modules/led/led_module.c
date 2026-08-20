@@ -50,7 +50,7 @@ static void update_leds_buzzer(const struct shared_ctx *ctx)
     }
 
     /* 1. LED 상태 결정 */
-    if (ctx->state == ST_DISARM || ctx->link.last_err != 0 /* ERR_NONE */ || !ctx->link.link_alive) {
+    if (ctx->state == ST_DISARM || !ctx->link.link_alive) {
         ctrl.red = 1u;
     } else if (ctx->state == ST_SCANNING || ctx->state == ST_EXPORT || ctx->link.scanning) {
         ctrl.green = 1u;
