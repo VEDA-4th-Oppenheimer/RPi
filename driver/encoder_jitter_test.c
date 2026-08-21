@@ -140,7 +140,7 @@ static void save_markdown_report(const char *filepath, int count, int interval_m
     }
 
     time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+    const struct tm *t = localtime(&now);
     char time_str[64];
     strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", t);
 
@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
 
     if (report_file[0] == '\0') {
         time_t now = time(NULL);
-        struct tm *t = localtime(&now);
+        const struct tm *t = localtime(&now);
         strftime(report_file, sizeof(report_file), "encoder_jitter_report_%Y%m%d_%H%M%S.md", t);
     }
 
