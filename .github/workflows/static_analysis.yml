@@ -13,11 +13,11 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+  # PR 쪽에는 paths-ignore 를 두지 않는다. 세 잡이 전부 required status check 라,
+  # 스킵되면 GitHub 이 "보고 대기" 로 남겨 문서 전용 PR 이 영구히 머지 불가가 된다.
+  # (STM32 repo 가 같은 교착을 먼저 겪고 4e8348f 로 같은 방식으로 풀었다)
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
 
 jobs:
   # ── 커널 드라이버 정적분석 (cppcheck + GCC Warn) ──
