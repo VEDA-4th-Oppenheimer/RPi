@@ -1,7 +1,11 @@
-# RPi 빌드환경 (Docker) — 맥 M4 + CLion
+# RPi 빌드환경 (Docker)
 
-VM/Gateway 없이 맥(M4)에서 RPi **데몬(epoll)** + **커널 드라이버(.ko)** 를 빌드.
-소스는 레포를 런타임 마운트(`-v`)하므로 이 폴더는 레포 밖에 있어도 됨.
+리눅스가 아닌 개발 머신(macOS·Windows)에서 RPi **데몬(epoll)** + **커널
+드라이버(.ko)** 를 빌드한다. 데몬은 `epoll`/`timerfd`/`signalfd`, 드라이버는
+커널 헤더가 필요해서 호스트에서는 컴파일 자체가 안 된다.
+
+VM/Gateway 없이 컨테이너 하나로 해결한다. 소스는 레포를 런타임 마운트(`-v`)
+하므로 이 폴더는 레포 밖에 있어도 된다.
 
 > 주의: 커널 값 `SUBLEVEL=75 / +rpt-rpi / -v8` 은 RPi `6.12.75+rpt-rpi-v8` 기준.
 > Pi 커널 바뀌면 `uname -r` 보고 Dockerfile ARG + 아래 KREL 갱신.
@@ -34,7 +38,9 @@ docker run -it --name adts \
 ```bash
 cd /usr/src/linux
 cp /pi-kernel/.config .config
-export ARCH=arm64                 # M4 네이티브 → CROSS_COMPILE 생략
+export ARCH=arm64
+# arm64 호스트(Apple Silicon 등)는 네이티브라 CROSS_COMPILE 이 필요 없다.
+# x86_64 호스트면 CROSS_COMPILE=aarch64-linux-gnu- 를 함께 준다.
 make olddefconfig
 make LOCALVERSION= modules_prepare
 cp /pi-kernel/Module.symvers .
@@ -54,9 +60,9 @@ bash /work/tools/run_static_analysis.sh daemon
 ```
 
 ## 5. CLion 연결
-1. Settings → Build, Execution, Deployment → **Docker** → + → Docker for Mac (연결 확인)
+1. Settings → Build, Execution, Deployment → **Docker** → + (호스트에 맞는 항목 선택, 연결 확인)
 2. Settings → **Toolchains** → + → Docker → Image: `adts-build`
-3. **데몬**: `RPi/daemon` 을 CMake 프로젝트로 열고 CMake Profile의 Toolchain을 `Docker(adts-build)` 로 지정 → 컨테이너에서 빌드/디버그/cppcheck (편집·인덱싱은 맥).
+3. **데몬**: `RPi/daemon` 을 CMake 프로젝트로 열고 CMake Profile의 Toolchain을 `Docker(adts-build)` 로 지정 → 컨테이너에서 빌드/디버그/cppcheck (편집·인덱싱은 호스트).
 4. **드라이버**: CMake 불가(Kbuild). 빌드는 `docker exec -it adts bash` 터미널에서 `make rpi`. 인덱싱은 컨테이너에서 `bear -- make rpi RPI_KDIR=/usr/src/linux LOCALVERSION=` → 생긴 `driver/compile_commands.json` 을 CLion Compilation Database로 열기.
 
 ## 6. 배포 & 테스트 (RPi에서만 — 컨테이너는 커널 없어 insmod 불가)
