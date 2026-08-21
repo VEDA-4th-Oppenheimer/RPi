@@ -1,14 +1,10 @@
 # broker/ — Mosquitto 브로커 · 인증서 · 발급 서비스
 
-담당: 이광진 (브로커 운영·인증서) · 이현우 (데몬측 mqtt_module 연동)
+담당: 이광진 (브로커·인증서) · 이현우 (데몬측 mqtt_module)
 
-> **왜 별도 문서인가**: 이 내용은 "코드를 읽는 사람" 이 아니라 **"장비를 세팅하는
-> 사람"** 이 보는 운영 런북이고, 별도 바이너리(`adts_enroll`)의 수명주기를 다룬다.
-> 루트 README 에 있을 때 전체의 60%(204줄)를 차지해 repo 소개를 덮고 있었다.
-
-관련 계약 문서:
+장비를 세팅하는 사람이 보는 운영 런북이다. 계약은
 [MQTT 토픽 계약](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/31162383) ·
-[Protocol](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/3833923)
+[Protocol](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/3833923).
 
 ---
 
@@ -28,14 +24,11 @@ sudo systemctl restart mosquitto
 `ca.key` 는 **이 장비 밖으로 내보내지 않는다.** 클라이언트에게는 인증서와 그
 클라이언트의 키만 전달한다.
 
-### 주의: `daemon.key` 는 서비스 계정이 읽어야 한다
+### daemon.key 권한
 
-`gen-certs.sh` 는 발급한 키를 전부 `600 root` 로 둔다. 그런데 데몬은 `User=pi` 로
-돌기 때문에 **그대로면 TLS 접속이 실패한다.**
-
-증상이 고약하다 — `mosquitto_tls_set` 이 `MOSQ_ERR_INVAL`("Invalid function
-arguments")로 실패해서 **권한 문제로 안 보인다.** 실제로 원인 찾는 데 반나절
-걸렸다.
+`gen-certs.sh` 는 키를 전부 `600 root` 로 두는데 데몬은 `User=pi` 로 돈다.
+그대로면 TLS 가 실패하는데, `mosquitto_tls_set` 이 `MOSQ_ERR_INVAL`
+("Invalid function arguments")를 내서 권한 문제로 보이지 않는다.
 
 ```bash
 sudo groupadd -f adts
@@ -44,17 +37,13 @@ sudo chgrp adts /etc/adts/certs/daemon.key
 sudo chmod 640  /etc/adts/certs/daemon.key
 ```
 
-**절대 `644` 로 두지 말 것** — 개인키다. `640` + 그룹 부여가 맞다.
+`644` 로 두지 말 것 — 개인키다. `ca.crt`·`daemon.crt` 는 `644` 라 그대로 읽힌다.
 
-`ca.crt`·`daemon.crt` 는 `644` 라 그대로 읽힌다. 문제는 키 하나뿐이다.
+`gen-certs.sh` 는 브로커용 `server.key` 만 조정해 준다(계정이 고정이라 가능).
+데몬 계정은 유닛 파일에 달려 있어 발급 시점에 알 수 없고, `install-service.sh` 는
+못 읽는 것을 알려주기만 한다. `sysusers.d` + `tmpfiles.d` 로 선언하면 자동화되지만
+아직 안 했다.
 
-⚠️ **`gen-certs.sh` 에 비대칭이 있다.** 브로커용 `server.key` 는 `mosquitto` 계정이
-읽도록 조정해 주는데(그쪽은 계정이 고정이라 가능하다), **데몬용 `daemon.key` 는
-안 해준다** — 서비스 계정이 유닛 파일에 달려 있어 발급 시점에 알 수 없기 때문이다.
-`install-service.sh` 가 못 읽는 것을 **감지해서 알려주지만 고치지는 않는다.**
-
-미결: `sysusers.d` + `tmpfiles.d` 로 선언해 두면 Raspberry Pi OS 와 Yocto 양쪽에서
-자동 적용된다(파일 두 개, 코드 변경 없음). 지금은 위 명령을 손으로 친다.
 
 ## 클라이언트 1개 추가 발급
 
