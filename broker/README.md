@@ -2,9 +2,8 @@
 
 담당: 이광진 (브로커·인증서) · 이현우 (데몬측 mqtt_module)
 
-장비를 세팅하는 사람이 보는 운영 런북이다. 계약은
-[MQTT 토픽 계약](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/31162383) ·
-[Protocol](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/3833923).
+장비를 세팅하는 사람이 보는 운영 런북이다.
+토픽·프레임 계약은 Confluence VPT space 참조.
 
 ---
 

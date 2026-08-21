@@ -11,7 +11,6 @@
 # =============================================================================
 [Unit]
 Description=ADTS 2-axis LiDAR scanner daemon
-Documentation=https://lkj000619.atlassian.net/wiki/spaces/VPT
 
 # 브로커가 먼저 떠 있어야 첫 접속이 붙는다. 늦게 떠도 mqtt_module 이 재접속을
 # 계속 시도하므로 치명적이진 않지만, 부팅 로그가 깨끗해진다.
