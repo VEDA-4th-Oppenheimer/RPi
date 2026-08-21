@@ -34,14 +34,14 @@
 ├── daemon/                  # 통합 데몬 (adts_daemon)
 │   ├── core/                #   epoll 루프·FSM·좌표변환·산출물 (이현우)
 │   ├── modules/
-│   │   ├── mqtt/            #   브로커 연동 (이현우 + 이광진)
+│   │   ├── mqtt/            #   브로커 연동 (이현우)
 │   │   ├── imu/             #   /dev/imu 수평 게이트 (송영빈)
 │   │   ├── led/             #   /dev/led_sw 표시·스위치 (강유근 + 이현우)
 │   │   └── camera/          #   스캔 JSON mTLS 업로드 (이현우)
 │   ├── adts-daemon.service  #   systemd 유닛
 │   └── tools/               #   install-service.sh · scan_batch.sh · fake_camera.py
 │
-├── broker/                  # Mosquitto 설정·인증서 발급 (이광진)
+├── broker/                  # Mosquitto 설정·인증서 발급 (이현우 + 송영빈)
 │   ├── README.md            #   구축·발급·운영 런북  <- 이쪽을 볼 것
 │   ├── gen-certs.sh         #   CA/서버/클라이언트 인증서
 │   ├── enroll_service.c     #   /enroll 발급 서비스 (C, OpenSSL + cJSON)
@@ -51,7 +51,7 @@
 │   ├── mosquitto.conf.example
 │   └── mosquitto.acl.example
 │
-├── docker/                  # 컨테이너 빌드 (macOS 에서 리눅스 전용 API 빌드용)
+├── docker/                  # 컨테이너 빌드 (리눅스 외 OS 에서 리눅스 전용 API 빌드용)
 │
 ├── tools/                   # 정적분석 설정
 │   ├── cppcheck_suppressions.txt

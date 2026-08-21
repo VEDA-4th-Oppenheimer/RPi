@@ -1,6 +1,6 @@
 # broker/ — Mosquitto 브로커 · 인증서 · 발급 서비스
 
-담당: 이광진 (브로커·인증서) · 이현우 (데몬측 mqtt_module)
+담당: 이현우 + 송영빈 (브로커·인증서) · 이현우 (데몬측 mqtt_module)
 
 장비를 세팅하는 사람이 보는 운영 런북이다.
 토픽·프레임 계약은 Confluence VPT space 참조.
