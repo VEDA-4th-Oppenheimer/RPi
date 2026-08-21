@@ -61,7 +61,7 @@
 
 ---
 
-##  protocol.h — 이 repo 가 마스터
+##  protocol.h
 
 `shared/protocol.h` 가 RPi↔STM32 통신 Protocol. 현재 **v6**.
 
