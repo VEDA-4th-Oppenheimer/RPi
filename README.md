@@ -1,15 +1,15 @@
-# ADTS — Raspberry Pi (드라이버 · 통합 데몬)
+# Raspberry Pi (드라이버 · 통합 데몬)
 
-**1D LiDAR Pan-Tilt 스캐너 / 자동 캘리브레이션 킷**의 라즈베리파이(엣지 서버) 측 코드.
-자작 커널 드라이버 3개로 하드웨어를 다루고, 통합 데몬이 스캔을 지휘해
-`(pan, tilt, d)` 스트림을 포인트클라우드로 만든 뒤 카메라 단에 올린다.
+1D LiDAR Pan-Tilt 스캐너 / 자동 캘리브레이션 킷의 라즈베리파이 측 코드.
+커널 드라이버 3개로 하드웨어를 다루고, 데몬이 스캔을 제어해 `(pan, tilt, d)`
+스트림을 포인트클라우드로 만든 뒤 raw data(.json)은 카메라에, 포인트 클라우드 파일(.pcd)는 QT(client)에 전달한다.
 
-> 프로젝트명 `A.D.T.S`(Anti-Drone…)는 2026-07-22 주제 전환 **이전**의 것이다.
-> 코드·경로에 남아 있지만 지금 하는 일은 안티드론과 무관하다.
+| | |
+|---|---|
+| 보드 / 커널 | Raspberry Pi 4 / Linux 6.12.y (LTS) 고정 |
+| 드라이버 | `/dev/turret`(serdev, STM32) · `/dev/imu`(ICM-20948) · `/dev/led_sw`(LED×3 + 스위치×2 + 부저) |
+| 상행 | MQTT-over-TLS 8883 (Qt) · mTLS TCP 2222 (카메라, 스캔 JSON) |
 
-- **보드**: Raspberry Pi 4 / **커널**: Linux 6.12.y (LTS) 고정
-- **자작 드라이버**: `/dev/turret`(serdev, STM32 링크) · `/dev/imu`(ICM-20948) · `/dev/led_sw`(LED×3 + 스위치×2 + 부저)
-- **상행**: MQTT-over-TLS 8883 (Qt 관제) · mTLS TCP 2222 (카메라로 스캔 JSON)
 
 ---
 
@@ -63,44 +63,33 @@
 
 ##  protocol.h — 이 repo 가 마스터
 
-`shared/protocol.h` 는 **RPi↔STM32 통신 계약의 단일 원본**이다.
-- **드라이버는 사본 없이 `../shared/protocol.h` 를 직접 include** (Makefile 경로 설정).
-- **STM32 repo** 는 이 파일의 사본을 두고, CI **drift-check** 로 이 마스터와 대조 → 불일치 시 PR 차단.
-- 프로토콜 변경은 **여기서 먼저** 하고 PROTO_VERSION 을 올린다. (현재 **v6**)
+`shared/protocol.h` 가 RPi↔STM32 통신 Protocol. 현재 **v6**.
 
-⚠️ **push 순서**: rpi `main` 을 먼저 반영한 뒤 STM32 를 push 한다. drift-check 가
-rpi `main` 의 raw 를 보므로 역순이면 STM32 PR 이 막힌다.
-
-⚠️ **복붙 사본 금지.** `driver/protocol.h` 같은 사본을 두면 Makefile 의 `-I$(src)` 가
-`-I$(src)/../shared` 보다 앞이라 **마스터를 가려** 옛 헤더로 조용히 빌드된다.
+- 드라이버는 사본 없이 `../shared/protocol.h` 를 직접 include 한다.
+  `driver/protocol.h` 같은 사본을 두면 `-I$(src)` 가 앞이라 마스터를 가린다.
+- STM32 repo 는 사본을 두고 CI drift-check 로 대조한다. 불일치 시 PR 차단.
+- 변경은 RPI 먼저 하고 `PROTO_VERSION` 을 올린다.
+- **push 순서**: rpi `main` 먼저 → STM32. drift-check 가 rpi `main` 의 raw 를 본다.
 
 ---
 
 ##  빌드
 
 ### 커널 드라이버 (driver/)
+
 ```bash
 cd driver
-# RPi 에서 로컬 빌드
-make
-# 또는 크로스컴파일 (커널 소스는 6.12.y 로 정렬 — KERNEL_BUILD.md 참고)
-make rpi
-
-# 오버레이
-make dtbo
-
-# 적재 (3종 전부 만들어진다)
+make            # RPi 에서 로컬 빌드
+make rpi        # 크로스컴파일 (KERNEL_BUILD.md)
+make dtbo       # 오버레이
 sudo insmod turret_driver.ko
 ```
-주의: `.ko` vermagic 이 실행 커널과 맞아야 함 → 커널 소스를 `rpi-6.12.y` 로 정렬 (KERNEL_BUILD.md).
 
-주의: **드라이버와 데몬은 반드시 같이 재빌드한다.** proto v5·v6 에서 `turret_link_state`
-가 커져 `TURRET_GET_STATE` 의 ioctl 매직이 두 번 바뀌었다. 한쪽만 갈면 `-ENOTTY` 로
-즉시 실패한다(조용한 구조체 오해석보다 안전하게 그렇게 만들었다).
-
-주의: `led_sw` 는 DT 오버레이가 적용돼 있어야 한다. 없으면 `of_get_named_gpio` 가
-`-EPROBE_DEFER(-517)` 를 내고 probe 가 실패한다 — 이 커널은 **gpiochip base 가 512**
-라 모듈 파라미터의 BCM 번호(17, 27 …)로는 절대 성공할 수 없다.
+- `.ko` vermagic 이 실행 커널과 맞아야 한다 → 커널 소스를 `rpi-6.12.y` 로 정렬.
+- **드라이버와 데몬은 같이 재빌드한다.** proto v5·v6 에서 `turret_link_state` 가
+  커져 ioctl 매직이 바뀌었다. 한쪽만 갈면 `-ENOTTY` 로 실패한다.
+- `led_sw` 는 DT 오버레이가 필요하다. 없으면 `-EPROBE_DEFER(-517)` 로 probe 실패 —
+  이 커널은 gpiochip base 가 512 라 BCM 번호(17, 27 …)로는 불가.
 
 ### 통합 데몬 (daemon/)
 
@@ -108,25 +97,20 @@ sudo insmod turret_driver.ko
 sudo apt install -y cmake libmosquitto-dev libcjson-dev libssl-dev
 cmake -S daemon -B daemon/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build daemon/build
-sudo ./daemon/build/adts_daemon          # 인자 없이 = 상주, MQTT 트리거 대기
+./daemon/build/adts_daemon                 # 인자 없이 = 상주, MQTT 트리거 대기
 ```
 
-주의: `libmosquitto-dev`/`libcjson-dev` 가 없으면 **에러 없이 MQTT 를 비활성으로**
-빌드한다(경고만 뜨고 넘어감). 데몬은 뜨지만 브로커에 붙지 않는다. 빌드 로그에
-`libmosquitto/libcjson 를 찾지 못해 MQTT 를 비활성으로 빌드합니다` 가 보이면
-의존성부터 설치할 것.
+의존성이 빠지면 **에러 없이 그 기능만 꺼진 채** 빌드된다. configure 로그를 볼 것.
 
-주의: `libssl-dev` 가 없으면 **카메라 업로드가 비활성으로** 빌드된다. 평문으로
-되돌리지 않고 아예 끄는 쪽을 택했다 — 보안 기능이 조용히 꺼진 채 도는 것이
-실패보다 나쁘고, 스캔 파일은 로컬에 남으므로 잃는 것도 없다. configure 로그에
-`카메라 업로드: mTLS 활성` 이 보여야 한다.
+| 없으면 | 결과 |
+|---|---|
+| `libmosquitto-dev` / `libcjson-dev` | MQTT 비활성 — 브로커에 안 붙음 |
+| `libssl-dev` | 카메라 업로드 비활성 (평문 폴백 없음) |
 
-주의: 인증서 권한 때문에 일반 계정으로는 TLS 가 실패할 수 있다 —
-[`broker/README.md`](broker/README.md) 의 "최초 구축" 절 참조. 권한을 맞춰두면
-`sudo` 없이 돌아간다(systemd 유닛도 `User=pi` 다).
+인증서 권한은 [`broker/README.md`](broker/README.md) 참조.
 
-CLI 로 1회 스캔만 돌리려면 `--scan` 을 쓴다 (`--help` 참고). 아래가 **표준 스캔**이며
-물리 버튼·웹·`scan_batch.sh` 도 같은 값을 쓴다(`daemon_module.h` 의 `SCAN_DEF_*`):
+CLI 1회 스캔. 아래가 표준값이며 물리 버튼·웹·`scan_batch.sh` 도 같다
+(`daemon_module.h` 의 `SCAN_DEF_*`):
 
 ```bash
 ./daemon/build/adts_daemon --scan 0 1791 -900 900 9 --height 1805 --once
@@ -136,39 +120,33 @@ CLI 로 1회 스캔만 돌리려면 `--scan` 을 쓴다 (`--help` 참고). 아�
 
 ##  MQTT 브로커 · 인증서
 
-브로커(Mosquitto)는 **RPi 에 상주**하고 데몬·Qt 관제·카메라가 모두 이 브로커의
-클라이언트다. 포트 8883 + mTLS 이며, 권한은 **인증서 CN** 으로 판정한다.
+브로커(Mosquitto)는 RPi 에 상주하고 데몬·Qt·카메라가 모두 클라이언트다.
+8883 + mTLS, 권한은 인증서 CN 으로 판정한다.
 
-**구축·발급·운영 절차는 [`broker/README.md`](broker/README.md) 에 있다.**
-인증서 발급, ACL, `/enroll` 발급 서비스, 문제 해결이 전부 그쪽이다.
+구축·발급·운영은 [`broker/README.md`](broker/README.md).
 
-⚠️ 데몬을 처음 띄울 때 가장 자주 걸리는 것은 **`daemon.key` 권한**이다. `gen-certs.sh`
-가 `600 root` 로 두는데 데몬은 `User=pi` 로 돌아서, 그대로면 TLS 가 `MOSQ_ERR_INVAL`
-("Invalid function arguments")로 실패한다 — **권한 문제로 안 보인다.**
-`broker/README.md` 의 "최초 구축" 절 참조.
-
+---
 
 ##  정적분석 (push 전 로컬 검사)
 
 ```bash
-bash tools/run_static_analysis.sh      # repo 루트에서
+bash tools/run_static_analysis.sh          # 전체
+bash tools/run_static_analysis.sh daemon   # 개별
 ```
-세 트랙을 돈다 — `driver`(cppcheck) · `daemon`(-Werror 빌드 + cppcheck) ·
-`broker`(같음). 개별로 돌리려면 `bash tools/run_static_analysis.sh daemon`.
 
-- CI(`.github/workflows/static_analysis.yml`)는 **`main` 브랜치에만** 걸린다(팀 결정).
-  required check 는 `driver-analysis` + `daemon-analysis` + `broker-analysis` 셋.
-- ⚠️ 그래서 `develop` 에 쌓이는 동안은 CI 가 안 봐준다. **push 전에 위 명령을 돌릴 것.**
-- ⚠️ 로컬 통과가 CI 통과를 보장하지 않는다. CI 의 cppcheck 는 2.13 이라 로컬(2.21)에
-  없는 오탐이 나온다(MISRA 11.8 등). 실제로 로컬 green 인데 CI 가 막은 적이 있다.
-- 전제: `cppcheck` 설치 (`brew install cppcheck` / `apt install cppcheck`).
+`driver`(cppcheck) · `daemon`(-Werror 빌드 + cppcheck) · `broker`(같음) 세 트랙.
+
+- CI 는 **`main` 브랜치에만** 걸린다. required check 는 세 잡 전부.
+- `develop` 에 쌓이는 동안은 CI 가 안 보므로 push 전에 로컬에서 돌릴 것.
+- 로컬 통과가 CI 통과를 보장하지 않는다. CI 는 cppcheck 2.13 이라 로컬(2.21)에
+  없는 오탐이 나온다.
+- 전제: `cppcheck` 설치.
 
 ---
 
 ## 주의
 
-- `protocol.h` 변경 = **여기(마스터) 먼저** → STM32 사본 동기화 (drift-check 가 강제).
-- 상주 서비스가 `/dev/turret` 을 **점유**한다. CLI 로 스캔하려면 먼저
-  `sudo systemctl stop adts-daemon`.
-- `*.ko`·`build/`·`compile_commands.json` 커밋 금지 (`.gitignore` 처리됨).
-- 커널 버전은 **6.12.y 고정** (재현성·vermagic).
+- `protocol.h` 변경은 여기(마스터) 먼저 → STM32 사본 동기화.
+- 상주 서비스가 `/dev/turret` 을 점유한다. CLI 스캔 전에 `sudo systemctl stop adts-daemon`.
+- `*.ko`·`build/`·`compile_commands.json` 커밋 금지.
+- 커널은 6.12.y 고정 (재현성·vermagic).

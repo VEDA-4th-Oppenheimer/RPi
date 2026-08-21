@@ -2,7 +2,6 @@
 
 VM/Gateway 없이 맥(M4)에서 RPi **데몬(epoll)** + **커널 드라이버(.ko)** 를 빌드.
 소스는 레포를 런타임 마운트(`-v`)하므로 이 폴더는 레포 밖에 있어도 됨.
-원리: [CrossCompile 문서](https://lkj000619.atlassian.net/wiki/spaces/VPT/pages/14450710/CrossCompile) / [Notion Docker Build](https://app.notion.com/p/3a7fdb06b70f8031b0f4e9c8ca6a6e54)
 
 > 주의: 커널 값 `SUBLEVEL=75 / +rpt-rpi / -v8` 은 RPi `6.12.75+rpt-rpi-v8` 기준.
 > Pi 커널 바뀌면 `uname -r` 보고 Dockerfile ARG + 아래 KREL 갱신.
