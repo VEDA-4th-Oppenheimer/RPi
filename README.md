@@ -1,8 +1,8 @@
-# ADTS — Raspberry Pi (드라이버 · 통합 데몬)
+# Raspberry Pi (드라이버 · 통합 데몬)
 
 1D LiDAR Pan-Tilt 스캐너 / 자동 캘리브레이션 킷의 라즈베리파이 측 코드.
-커널 드라이버 3개로 하드웨어를 다루고, 데몬이 스캔을 지휘해 `(pan, tilt, d)`
-스트림을 포인트클라우드로 만든 뒤 카메라 단에 올린다.
+커널 드라이버 3개로 하드웨어를 다루고, 데몬이 스캔을 제어해 `(pan, tilt, d)`
+스트림을 포인트클라우드로 만든 뒤 raw data(.json)은 카메라에, 포인트 클라우드 파일(.pcd)는 QT(client)에 전달한다.
 
 | | |
 |---|---|
@@ -10,8 +10,6 @@
 | 드라이버 | `/dev/turret`(serdev, STM32) · `/dev/imu`(ICM-20948) · `/dev/led_sw`(LED×3 + 스위치×2 + 부저) |
 | 상행 | MQTT-over-TLS 8883 (Qt) · mTLS TCP 2222 (카메라, 스캔 JSON) |
 
-이름의 `A.D.T.S`(Anti-Drone…)는 2026-07-22 주제 전환 이전 것이다. 경로에 남아
-있지만 지금 하는 일은 안티드론과 무관하다.
 
 ---
 
@@ -65,12 +63,12 @@
 
 ##  protocol.h — 이 repo 가 마스터
 
-`shared/protocol.h` 가 RPi↔STM32 통신 계약의 단일 원본이다. 현재 **v6**.
+`shared/protocol.h` 가 RPi↔STM32 통신 Protocol. 현재 **v6**.
 
 - 드라이버는 사본 없이 `../shared/protocol.h` 를 직접 include 한다.
   `driver/protocol.h` 같은 사본을 두면 `-I$(src)` 가 앞이라 마스터를 가린다.
 - STM32 repo 는 사본을 두고 CI drift-check 로 대조한다. 불일치 시 PR 차단.
-- 변경은 여기서 먼저 하고 `PROTO_VERSION` 을 올린다.
+- 변경은 RPI 먼저 하고 `PROTO_VERSION` 을 올린다.
 - **push 순서**: rpi `main` 먼저 → STM32. drift-check 가 rpi `main` 의 raw 를 본다.
 
 ---
@@ -91,7 +89,7 @@ sudo insmod turret_driver.ko
 - **드라이버와 데몬은 같이 재빌드한다.** proto v5·v6 에서 `turret_link_state` 가
   커져 ioctl 매직이 바뀌었다. 한쪽만 갈면 `-ENOTTY` 로 실패한다.
 - `led_sw` 는 DT 오버레이가 필요하다. 없으면 `-EPROBE_DEFER(-517)` 로 probe 실패 —
-  이 커널은 gpiochip base 가 512 라 BCM 번호(17, 27 …)로는 안 된다.
+  이 커널은 gpiochip base 가 512 라 BCM 번호(17, 27 …)로는 불가.
 
 ### 통합 데몬 (daemon/)
 
