@@ -165,23 +165,6 @@ bash tools/run_static_analysis.sh      # repo 루트에서
 
 ---
 
-##  소유권 (CODEOWNERS)
-
-| 경로 | 담당 |
-|---|---|
-| `shared/`, `driver/`, `daemon/core/` | 이현우 |
-| `daemon/modules/mqtt/` | 이현우 + 이광진 |
-| `daemon/modules/imu/` | 송영빈 |
-| `daemon/modules/led/` | 강유근 (드라이버) + 이현우 (모듈) |
-| `daemon/modules/camera/` | 이현우 |
-| `broker/` | 이광진 |
-| `tools/`, `.github/` | 강유근 (QA) |
-
-GitHub 핸들은 `CODEOWNERS` 참조. 다섯 명 모두 저장소 협업자라 PR 리뷰어가
-자동 지정된다. 폴더가 늘면 `CODEOWNERS` 와 이 표를 **같이** 고칠 것.
-
----
-
 ## 주의
 
 - `protocol.h` 변경 = **여기(마스터) 먼저** → STM32 사본 동기화 (drift-check 가 강제).
