@@ -811,12 +811,6 @@ static void core_transition(struct core *c, daemon_state_t want)
             core_log(c, "EXPORT", "%s (%u점) — 카메라 단 전달 대기",
                      c->ctx.result.path, c->ctx.result.point_count);
         } else {
-            /* 배치 실행은 로그가 아니라 --once 종료 코드로 성공 여부를 판정한다.
-             * 상주 서비스의 나중 종료 코드에는 영향을 주지 않도록 --once에서만
-             * 실패를 기억한다. */
-            if (c->exit_after_scan) {
-                c->scan_failed = true;
-            }
             /* 사유는 scan_out_close 가 이미 상세히 찍었다. 여기서는 이 스캔이
              * 산출물 없이 끝났다는 것만 분명히 한다. */
             core_log(c, "EXPORT",
