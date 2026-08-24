@@ -2,7 +2,7 @@
  *  camera_module.c  --  스캔 JSON 을 CCTV 앱(CV5 OpenSDK)으로 mTLS 업로드
  *  담당: 이현우 (수신측 lidar_json_receiver = 이영민)
  *
- *  스캔이 끝나면(ST_EXPORT) 원시 측정 JSON 을 카메라의 TLS 서버로 보낸다.
+ *  스캔이 끝나면(ST_EXPORT) organized 측정 JSON 을 카메라의 TLS 서버로 보낸다.
  *  캘리브 연산은 카메라 단이 하고, 여기서는 파일을 건네주는 것까지만 한다.
  *
  *  ── 와이어 프로토콜 (lidar_json_receiver/README.md) ──
@@ -320,8 +320,19 @@ static void ssl_err_str(char *out, size_t cap)
     ERR_clear_error();
 }
 
-/* SSL_CTX 는 한 번 만들어 재사용한다. 실패하면 NULL 을 남기고, 다음 업로드
- * 때 다시 시도한다(그 사이에 인증서를 설치했을 수 있다). */
+static void tls_ctx_reset(void)
+{
+    if (s_tls != NULL) {
+        SSL_CTX_free(s_tls);
+        s_tls = NULL;
+    }
+}
+
+/* 현재 설정으로 SSL_CTX 를 만든다. 실패하면 NULL 을 남기고, 다음 업로드
+ * 때 다시 시도한다(그 사이에 인증서를 설치했을 수 있다).
+ *
+ * 업로드 시도마다 tls_ctx_reset() 뒤 호출한다. 설정 경로가 바뀐 경우뿐 아니라
+ * 같은 경로의 인증서를 교체한 경우도 데몬 재시작 없이 반영하기 위해서다. */
 static bool tls_ctx_ready(char *reason, size_t reason_len)
 {
     SSL_CTX *c;
@@ -336,7 +347,11 @@ static bool tls_ctx_ready(char *reason, size_t reason_len)
         return false;
     }
     /* TLS 1.2 미만은 받지 않는다. */
-    (void)SSL_CTX_set_min_proto_version(c, TLS1_2_VERSION);
+    if (SSL_CTX_set_min_proto_version(c, TLS1_2_VERSION) != 1) {
+        (void)snprintf(reason, reason_len, "TLS 최소 버전 설정 실패");
+        SSL_CTX_free(c);
+        return false;
+    }
     (void)SSL_CTX_set_mode(c, SSL_MODE_AUTO_RETRY);
 
     if (SSL_CTX_load_verify_locations(c, s_ca, NULL) != 1) {
@@ -491,10 +506,13 @@ static bool ssl_send_all(SSL *ssl, const void *buf, size_t len)
  *
  * 핵심: 여기가 이 모듈의 요점이다. connect 는 s_host(그때그때의 IP)로 하지만
  *   검증은 s_name(고정된 이름)으로 한다. */
-static SSL *tls_handshake(int fd, char *reason, size_t reason_len)
+static SSL *tls_handshake(int fd, char *reason, size_t reason_len,
+                          bool *retryable)
 {
     SSL *ssl = SSL_new(s_tls);
     X509_VERIFY_PARAM *param;
+
+    *retryable = false;
 
     if (ssl == NULL) {
         (void)snprintf(reason, reason_len, "SSL_new 실패");
@@ -518,25 +536,74 @@ static SSL *tls_handshake(int fd, char *reason, size_t reason_len)
         return NULL;
     }
 
-    if (SSL_connect(ssl) != 1) {
-        /* 주의: 접속 실패와 신원 불일치를 반드시 구분해서 알린다. 전자는
-         *   "주소가 틀렸다"(설정 파일을 고쳐라), 후자는 "다른 장비다"
-         *   (DHCP 가 그 IP 를 남에게 줬거나 인증서가 안 맞다)라서 대응이
-         *   완전히 다르다. 뭉뚱그리면 엉뚱한 데를 고치게 된다. */
-        const long vr = SSL_get_verify_result(ssl);
-        if (vr != X509_V_OK) {
-            (void)snprintf(reason, reason_len,
-                           "신원 불일치 — %s (기대한 이름 '%s')",
-                           X509_verify_cert_error_string(vr), s_name);
-        } else {
-            char e[128];
-            ssl_err_str(e, sizeof(e));
-            (void)snprintf(reason, reason_len, "TLS 핸드셰이크 실패: %s", e);
+    {
+        const int hs_rc = SSL_connect(ssl);
+
+        if (hs_rc != 1) {
+            /* 주의: 접속 실패와 신원 불일치를 반드시 구분해서 알린다. 전자는
+             *   "주소가 틀렸다"(설정 파일을 고쳐라), 후자는 "다른 장비다"
+             *   (DHCP 가 그 IP 를 남에게 줬거나 인증서가 안 맞다)라서 대응이
+             *   완전히 다르다. 뭉뚱그리면 엉뚱한 데를 고치게 된다. */
+            const long vr = SSL_get_verify_result(ssl);
+
+            if (vr != X509_V_OK) {
+                (void)snprintf(reason, reason_len,
+                               "신원 불일치 — %s (기대한 이름 '%s')",
+                               X509_verify_cert_error_string(vr), s_name);
+            } else {
+                const int ssl_rc = SSL_get_error(ssl, hs_rc);
+                char e[128];
+
+                /* 인증서 검증은 끝났지만 상대가 연결을 끊었거나 소켓 타임아웃이
+                 * 난 경우는 무선의 일시 장애일 수 있다. 프로토콜·인증서 오류와
+                 * 달리 다음 시도에서 회복할 가능성이 있으므로 재시도 대상으로 둔다. */
+                *retryable = (ssl_rc == SSL_ERROR_SYSCALL)
+                          || (ssl_rc == SSL_ERROR_ZERO_RETURN)
+                          || (ssl_rc == SSL_ERROR_WANT_READ)
+                          || (ssl_rc == SSL_ERROR_WANT_WRITE);
+                ssl_err_str(e, sizeof(e));
+                (void)snprintf(reason, reason_len,
+                               "TLS 핸드셰이크 실패: %s", e);
+            }
+            SSL_free(ssl);
+            return NULL;
         }
-        SSL_free(ssl);
-        return NULL;
     }
     return ssl;
+}
+
+static const char *skip_json_ws(const char *p)
+{
+    while ((*p == ' ') || (*p == '\t') || (*p == '\r') || (*p == '\n')) {
+        p++;
+    }
+    return p;
+}
+
+/* 수신기는 작은 JSON 한 줄을 보낸다. cJSON 은 선택 의존성이므로 이 모듈에서
+ * 강제로 링크하지 않고, result 문자열 필드만 최소한으로 판정한다. 키와 콜론
+ * 사이의 JSON 공백은 허용하되 값은 정확히 "ok" 여야 한다. */
+static bool reply_is_ok(const char *reply)
+{
+    const char *p = skip_json_ws(reply);
+
+    if (*p != '{') {
+        return false;
+    }
+    p = skip_json_ws(p + 1);
+    if (strncmp(p, "\"result\"", sizeof("\"result\"") - 1u) != 0) {
+        return false;
+    }
+    p = skip_json_ws(p + (sizeof("\"result\"") - 1u));
+    if (*p != ':') {
+        return false;
+    }
+    p = skip_json_ws(p + 1);
+    if (strncmp(p, "\"ok\"", sizeof("\"ok\"") - 1u) != 0) {
+        return false;
+    }
+    p = skip_json_ws(p + (sizeof("\"ok\"") - 1u));
+    return (*p == ',') || (*p == '}');
 }
 #endif /* !ADTS_NO_TLS */
 
@@ -575,6 +642,9 @@ static int upload_once(const char *path, char *reason, size_t reason_len)
     int fd = -1;
     int rc = UP_RETRY;
 
+    /* 설정과 인증서 파일을 시도마다 다시 반영한다. 같은 경로에 새 인증서를
+     * 원자적으로 교체한 경우도 이전 SSL_CTX 를 계속 쓰면 안 된다. */
+    tls_ctx_reset();
     if (!tls_ctx_ready(reason, reason_len)) {
         return UP_FATAL;   /* 인증서 파일 문제 — 2초 뒤에도 같다 */
     }
@@ -609,12 +679,15 @@ static int upload_once(const char *path, char *reason, size_t reason_len)
         return UP_RETRY;   /* 주소가 살아날 수도, 무선이 돌아올 수도 */
     }
 
-    ssl = tls_handshake(fd, reason, reason_len);
-    if (ssl == NULL) {
-        /* 신원이 안 맞거나 인증서가 안 맞는다 — 재시도해도 같다. */
-        (void)close(fd);
-        (void)fclose(f);
-        return UP_FATAL;
+    {
+        bool retryable = false;
+
+        ssl = tls_handshake(fd, reason, reason_len, &retryable);
+        if (ssl == NULL) {
+            (void)close(fd);
+            (void)fclose(f);
+            return retryable ? UP_RETRY : UP_FATAL;
+        }
     }
 
     /* ── 헤더 ── 길이는 전부 네트워크 바이트오더(big endian) ── */
@@ -691,9 +764,7 @@ static int upload_once(const char *path, char *reason, size_t reason_len)
         }
         reply[used] = '\0';
 
-        /* 수신측 IsSuccessReply() 와 같은 기준. 공백 변형까지 보진 않는다 —
-         * 같은 코드베이스가 생성하는 응답이라 형식이 고정이다. */
-        if (strstr(reply, "\"result\":\"ok\"") == NULL) {
+        if (!reply_is_ok(reply)) {
             (void)snprintf(reason, reason_len, "카메라 거부: %.160s", reply);
             goto out;
         }
@@ -841,10 +912,7 @@ static void cam_deinit(struct shared_ctx *ctx)
 {
     (void)ctx;
 #ifndef ADTS_NO_TLS
-    if (s_tls != NULL) {
-        SSL_CTX_free(s_tls);
-        s_tls = NULL;
-    }
+    tls_ctx_reset();
 #endif
     s_ctx = NULL;
 }
