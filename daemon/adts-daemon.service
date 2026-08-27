@@ -46,6 +46,19 @@ StateDirectory=adts/scans
 StateDirectoryMode=0750
 WorkingDirectory=/var/lib/adts
 
+# 일자별 로그(/var/log/adts/adts-YYYYMMDD.log).
+#
+#   ProtectSystem=strict 아래서는 /var/log 가 읽기전용이라 데몬이 직접 mkdir 을
+#   못 한다. LogsDirectory= 를 주면 systemd 가 만들고 User 소유로 맞춘 뒤
+#   쓰기 가능하게 열어준다 — ReadWritePaths 를 손으로 추가할 필요가 없다.
+#   이게 없으면 데몬은 조용히 ./logs(= /var/lib/adts/logs)로 폴백한다.
+#
+#   주의: journald 에도 같은 내용이 그대로 들어간다(stderr 를 가로채므로).
+#     파일은 그것과 별개로 평문으로 남겨 두기 위한 것이고, 둘 중 하나를 끄면
+#     오히려 경우의 수만 늘어난다.
+LogsDirectory=adts
+LogsDirectoryMode=0750
+
 # 접속/인증서. 값은 데몬 기본값과 같지만, 여기 적어두면 systemctl edit 로
 # 코드 수정 없이 바꿀 수 있다.
 Environment=ADTS_MQTT_HOST=127.0.0.1

@@ -1132,6 +1132,83 @@ void core_hb_reprime(void *core)
     core_log(c, "HB", "heartbeat 기준선 재설정 (블로킹 작업 후)");
 }
 
+/* ---------------------------------------------------------------------------
+ *  일자별 로그 파일
+ *
+ *  화면(stderr)과 파일에 같이 쓴다. 파일은 하루에 하나(adts-YYYYMMDD.log)이고
+ *  **이어붙인다** — 하루에 스캔을 여러 번 돌려도 한 파일에 시간순으로 쌓인다.
+ *
+ *  ⚠️ 자정을 넘기면 파일을 바꿔야 한다. 상주 데몬은 며칠씩 떠 있으므로, 시작할
+ *    때 한 번만 열어두면 26일에 띄운 프로세스가 27일·28일 로그를 전부 26일
+ *    파일에 쓴다. 그래서 매 줄 날짜(tm_yday)를 대조하고 바뀌었으면 다시 연다.
+ *
+ *  ⚠️ 매 줄 fflush 한다. 안 하면 데몬이 죽었을 때 **죽은 이유가 담긴 마지막
+ *    몇 줄이** 버퍼에 남은 채 사라진다 — 정작 필요한 부분만 못 보게 된다.
+ *    로그 줄은 상태 전이·오류 정도라 초당 수십 줄이 나올 일이 없어 비용은 무시
+ *    할 수준이다(스캔 진행률은 MQTT 로 나가지 로그로 안 나간다).
+ *
+ *  systemd 로 돌 때는 journald 에도 그대로 들어간다(stderr 를 가로채므로).
+ *  파일은 그것과 별개로, .pcd 와 같은 기계에 평문으로 남겨 두기 위한 것이다.
+ * ------------------------------------------------------------------------- */
+#define LOG_DIR_DEFAULT  "/var/log/adts"   /* 실패 시 ./logs 로 폴백 */
+
+static FILE *s_logf     = NULL;
+static char  s_log_dir[192] = LOG_DIR_DEFAULT;
+static int   s_log_yday = -1;
+static bool  s_log_off  = false;   /* 한 번 실패하면 매 줄 경고하지 않는다 */
+
+/* --log-dir "" 로 파일 로깅을 끌 수 있다. */
+static void core_log_set_dir(const char *dir)
+{
+    if (dir == NULL || dir[0] == '\0') {
+        s_log_off = true;
+        return;
+    }
+    (void)snprintf(s_log_dir, sizeof(s_log_dir), "%s", dir);
+}
+
+/* 오늘 날짜의 파일이 열려 있도록 맞춘다. 이미 맞으면 아무것도 안 한다. */
+static void log_file_sync(const struct tm *tmv)
+{
+    if (s_log_off || ((s_logf != NULL) && (s_log_yday == tmv->tm_yday))) {
+        return;
+    }
+    if (s_logf != NULL) {
+        (void)fclose(s_logf);
+        s_logf = NULL;
+    }
+
+    if ((mkdir(s_log_dir, 0755) < 0) && (errno != EEXIST)) {
+        /* 시스템 경로가 막힌 경우(개발 PC, systemd ProtectSystem=strict 인데
+         * LogsDirectory= 를 안 준 경우) 현재 디렉토리로 떨어진다. */
+        (void)snprintf(s_log_dir, sizeof(s_log_dir), "./logs");
+        if ((mkdir(s_log_dir, 0755) < 0) && (errno != EEXIST)) {
+            s_log_off = true;
+            (void)fprintf(stderr, "[LOG     ] 로그 디렉토리 생성 실패: %s — 화면 출력만\n",
+                          strerror(errno));
+            return;
+        }
+    }
+
+    char path[288];
+    (void)snprintf(path, sizeof(path), "%s/adts-%04d%02d%02d.log",
+                   s_log_dir, tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday);
+    s_logf = fopen(path, "a");
+    if (s_logf == NULL) {
+        s_log_off = true;
+        (void)fprintf(stderr, "[LOG     ] 로그 파일 열기 실패 %s: %s — 화면 출력만\n",
+                      path, strerror(errno));
+        return;
+    }
+    s_log_yday = tmv->tm_yday;
+
+    /* 이어붙이는 파일이라 실행 경계가 안 보인다. 구분선을 넣어야 "이 줄이
+     * 어느 실행의 것인가" 를 나중에 셀 수 있다. pid 는 재시작 반복을 구분한다. */
+    (void)fprintf(s_logf, "===== %04d-%02d-%02d 데몬 로그 시작 (pid %ld) =====\n",
+                  tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday, (long)getpid());
+    (void)fflush(s_logf);
+}
+
 void core_log(void *core, const char *event, const char *fmt, ...)
 {
     (void)core;
@@ -1141,6 +1218,26 @@ void core_log(void *core, const char *event, const char *fmt, ...)
     (void)vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     (void)fprintf(stderr, "[%-8s] %s\n", event, buf);
+
+    time_t    now = time(NULL);
+    struct tm tmv;
+    memset(&tmv, 0, sizeof(tmv));
+    (void)localtime_r(&now, &tmv);
+    log_file_sync(&tmv);
+    if (s_logf != NULL) {
+        /* 날짜는 파일 이름에 있으므로 줄에는 시각만 넣는다. */
+        (void)fprintf(s_logf, "%02d:%02d:%02d [%-8s] %s\n",
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec, event, buf);
+        (void)fflush(s_logf);
+    }
+}
+
+static void core_log_close(void)
+{
+    if (s_logf != NULL) {
+        (void)fclose(s_logf);
+        s_logf = NULL;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1156,7 +1253,7 @@ static void usage(const char *p)
         "사용법:\n"
         "  %s                                   데몬 상주 (MQTT 트리거 대기)\n"
         "  %s --scan <pan0> <pan1> <tilt0> <tilt1> <step> [--height <mm>]\n"
-        "       [--lidar-offset <mm>] [--once]\n"
+        "       [--lidar-offset <mm>] [--log-dir <경로>] [--once]\n"
         "\n"
         "  각도는 **기구각**, 단위 0.1도.  pan %d..%d,  tilt %d..%d,  step 9 = 0.9도\n"
         "  --height 지면→라이다 높이(mm). 좌표엔 안 들어가고 메타데이터로만 실린다.\n"
@@ -1164,6 +1261,9 @@ static void usage(const char *p)
         "           라이다는 발광면 기준 거리를 주는데 좌표 원점은 축교점이라\n"
         "           r = 보고거리 + 이 값 으로 보정한다. **좌표에 들어간다.**\n"
         "           기구를 바꿔 재조립했을 때만 실측해서 넘기면 된다.\n"
+        "  --log-dir  일자별 로그(adts-YYYYMMDD.log)를 쌓을 디렉토리.\n"
+        "           기본 %s, 못 쓰면 ./logs 로 폴백. \"\" 를 주면 파일 로깅을 끈다.\n"
+        "           하루에 한 파일에 이어붙이고, 자정을 넘기면 스스로 파일을 바꾼다.\n"
         "  --once   스캔 1회 완료(EXPORT)되면 종료.\n"
         "\n"
         "  주의: 2축 스윕은 한 줄이 방위 p 와 p+180 을 같이 훑는다. 그래서 팬은\n"
@@ -1177,6 +1277,7 @@ static void usage(const char *p)
         "    중복이 동시에 생긴다. 팬 %d(179.1도)는 200줄 x 2방위로 정확히\n"
         "    360도를 덮는 값이다(daemon_module.h 의 SCAN_DEF_* 참조).\n",
         p, p, PAN_MIN, PAN_MAX, TILT_MIN, TILT_MAX, LIDAR_RANGE_OFFSET_MM,
+        LOG_DIR_DEFAULT,
         p, SCAN_DEF_PAN_START_DDEG, SCAN_DEF_PAN_END_DDEG,
         SCAN_DEF_TILT_START_DDEG, SCAN_DEF_TILT_END_DDEG, SCAN_DEF_STEP_DDEG,
         SCAN_DEF_HEIGHT_MM, SCAN_DEF_PAN_END_DDEG);
@@ -1206,6 +1307,9 @@ static bool parse_args(int argc, char **argv, struct scan_request *req,
             i += 1;
         } else if ((strcmp(argv[i], "--lidar-offset") == 0) && ((i + 1) < argc)) {
             *lidar_off = (int32_t)atoi(argv[i + 1]);
+            i += 1;
+        } else if ((strcmp(argv[i], "--log-dir") == 0) && ((i + 1) < argc)) {
+            core_log_set_dir(argv[i + 1]);   /* "" 이면 파일 로깅 끔 */
             i += 1;
         } else if (strcmp(argv[i], "--once") == 0) {
             *once = true;
@@ -1272,6 +1376,7 @@ int main(int argc, char **argv)
 
     core_run(&core);
     core_shutdown(&core);
+    core_log_close();   /* core_shutdown 의 마지막 줄까지 파일에 남기고 닫는다 */
     /* 스캔이 취소된 채 --once 로 끝났으면 실패로 알린다. 배치 스크립트가
      * 로그를 grep 하지 않고 종료코드만 보면 되도록. */
     return core.scan_failed ? 1 : 0;
