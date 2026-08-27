@@ -68,8 +68,8 @@ static void update_leds_buzzer(const struct shared_ctx *ctx, bool advance)
 
     /* 2. 부저 시퀀스 로직 (1 tick = 100ms) */
     if (s_buz_seq == BUZ_SCAN_DONE) {
-        /* 0.5초 1번 = 5 ticks ON */
-        if (s_buz_ticks < 5) {
+        /* 정상 종료 알림음: 1.0초 1번 = 10 ticks ON */
+        if (s_buz_ticks < 10) {
             ctrl.buzzer = 1u;
             if (advance) {
                 s_buz_ticks++;
@@ -199,14 +199,20 @@ static void led_on_tick(struct shared_ctx *ctx, daemon_state_t state)
 static void led_on_state(struct shared_ctx *ctx,
                          daemon_state_t old_st, daemon_state_t new_st)
 {
-    (void)old_st;
-
-    /* SCAN_DONE (ST_EXPORT 진입) 감지 -> 0.5초 알림음 */
-    if (new_st == ST_EXPORT) {
+    /* SCAN_DONE: ST_EXPORT -> ST_IDLE 복귀 시 1.0초 완료 알림음 (10 ticks)
+     *
+     * ⚠️ 이전에는 `new_st == ST_EXPORT` 진입 시 부저를 켰는데, 바로 다음 순서인
+     *   camera_module 의 mTLS 업로드가 동기 블로킹(수 초~수십 초)으로 실행되면서
+     *   100ms 틱 타이머가 멈춰 카메라 통신 내내 부저가 꺼지지 않고 계속 울리는
+     *   버그가 발생했다.
+     *   업로드가 모두 끝나고 메인 루프로 복귀하는 `ST_EXPORT -> ST_IDLE` 시점에
+     *   트리거하여 타이머 틱이 블로킹 없이 정확히 1.0초 카운트 후 소등되도록 한다. */
+    if (old_st == ST_EXPORT && new_st == ST_IDLE) {
         s_buz_seq = BUZ_SCAN_DONE;
         s_buz_ticks = 0;
-    } else if (new_st == ST_DISARM) {
-        /* 비상정지 (ST_DISARM 진입) 감지 -> 0.2초 2회 경고음 */
+    } else if (new_st == ST_DISARM && old_st != ST_IDLE) {
+        /* 비상정지 (ST_DISARM 진입) 감지 -> 0.2초 2회 경고음
+         * (스캔 완료 15초 후의 정상 자동 절전 DISARM 은 에러음에서 제외) */
         s_buz_seq = BUZ_ERROR;
         s_buz_ticks = 0;
     }

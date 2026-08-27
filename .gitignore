@@ -34,6 +34,9 @@ compile_commands.json
 .vscode/
 .DS_Store
 .claude
+.clangd
+CLAUDE.md
+compile_flags.txt
 .agents/
 # ⚠️ docs/ 는 무시하지 않는다. 개인 작업 메모를 무시하려다 들어왔는데,
 #   이 레포는 산출물(README·설계 문서)을 담아야 하므로 docs/ 를 통째로
