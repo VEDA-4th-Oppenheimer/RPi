@@ -273,30 +273,7 @@ static bool issue_cert(const char *cn, char **ca_pem, char **crt_pem, char **key
      * 주의: 이전 인증서는 파일을 지운다고 폐기되지 않는다 — 암호학적으로 여전히
      *    유효하다. 실제로 무효화하려면 브로커에 CRL 을 걸어야 한다. */
     if (access(crt_path, F_OK) == 0) {
-        /* 재발급이면 이전 인증서를 먼저 CRL 에 올린다.
-         *
-         * 핵심: 파일을 지우는 것으로는 무효화되지 않는다. 암호학적으로 여전히
-         *   유효해서, 로그아웃 전에 인증서를 복사해 둔 사람은 계속 adts/cmd/#
-         *   에 명령을 쓸 수 있다. 폐기가 유일한 회수 수단이다.
-         *
-         * 주의: 폐기는 **브로커 restart 로만 반영된다.** 여기서 restart 하지
-         *   않는 이유는 그 순간 데몬과 다른 Qt 콘솔의 접속이 전부 끊기기
-         *   때문이다. 발급 요청 하나가 운영 중인 스캔을 방해해서는 안 된다.
-         *   CRL 은 갱신해 두고, 실제 차단 시점은 관리자가 정한다.
-         *
-         * 실패해도 발급은 계속한다 — 새 인증서를 못 받는 것이 더 나쁘다.
-         * 대신 경고를 남겨 관리자가 손으로 처리할 수 있게 한다. */
-        char *revoke_argv[] = { (char *)"/bin/bash", (char *)g_gen_certs,
-                                (char *)"--revoke-cert", (char *)cn,
-                                (char *)g_cert_dir, NULL };
-
-        if (run_cmd(revoke_argv)) {
-            logmsg("INFO", "CN=%s 재발급 — 이전 인증서를 CRL 에 올렸습니다"
-                           " (차단은 mosquitto restart 후 적용)", cn);
-        } else {
-            logmsg("WARN", "CN=%s 재발급 — 폐기에 실패했습니다."
-                           " 이전 인증서가 여전히 유효합니다", cn);
-        }
+        logmsg("WARN", "CN=%s 재발급 — 이전 인증서는 CRL 없이는 여전히 유효합니다", cn);
         (void)unlink(crt_path);
         (void)unlink(key_path);
         (void)unlink(pkcs8_path);

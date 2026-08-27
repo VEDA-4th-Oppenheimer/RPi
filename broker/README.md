@@ -213,64 +213,8 @@ Qt 의 로그아웃은 **기기에 저장된 인증서·설정을 지울 뿐**�
 여전히 유효해서, 파일을 따로 보관해 뒀다면 다시 붙을 수 있다.
 
 - **권한만 끊기**: ACL 에서 해당 CN 블록 삭제 → reload. 연결은 되지만 아무것도 못 한다.
-- **연결까지 끊기**: 아래 폐기(CRL).
-
-### 인증서 폐기 (CRL) — 기본 미사용
-
-지금은 켜지 않는다. 인증서 보유자가 전부 팀원이고 분실 사건이 없어서, 접근
-차단은 ACL 블록 삭제로 충분하다. 그쪽은 `reload`(무중단)로 끝나고, 연결만
-허용될 뿐 발행·구독이 전부 막힌다.
-
-기기 분실처럼 **연결 자체**를 끊어야 할 일이 생기면 아래 순서로 켠다. 순서를
-바꾸면 브로커가 안 뜬다.
-
-```bash
-# 1) CRL 을 먼저 만든다 (빈 CRL — 폐기 목록 없음)
-sudo bash gen-certs.sh --gencrl /etc/adts/certs
-ls -l /etc/adts/certs/crl.pem              # mosquitto 가 읽을 수 있어야 한다
-
-# 2) 그 다음에 crlfile 을 켠다 (설정 파일을 통째로 덮어쓰지 말 것)
-sudo sed -i '/^require_certificate true/a crlfile /etc/adts/certs/crl.pem' \
-    /etc/mosquitto/conf.d/adts.conf
-sudo systemctl restart mosquitto
-systemctl is-active mosquitto              # failed 면 즉시 아래로 원복
-
-# 되돌리기
-sudo sed -i '/^crlfile /d' /etc/mosquitto/conf.d/adts.conf
-sudo systemctl restart mosquitto
-```
-
-켠 뒤의 폐기:
-
-```bash
-sudo bash gen-certs.sh --revoke-cert qt-console-gwangjin /etc/adts/certs
-sudo systemctl restart mosquitto
-```
-
-폐기 목록 확인:
-
-```bash
-sudo bash gen-certs.sh --gencrl /etc/adts/certs
-```
-
-주의: **restart 여야 한다.** `reload`(SIGHUP)는 ACL 만 다시 읽는다. 이미 만들어진
-TLS 컨텍스트는 그대로라 폐기한 인증서로 계속 붙는다. restart 는 붙어 있던
-클라이언트를 전부 끊지만 데몬과 Qt 는 재접속하므로 스캔 중만 피하면 된다.
-
-주의: `mosquitto.conf` 에 `crlfile` 을 켜면 `crl.pem` 이 **반드시 있어야 한다.**
-없으면 브로커가 아예 뜨지 않는다. 폐기한 것이 하나도 없어도 빈 CRL 이 필요하다.
-CRL 도입 전에 구축한 배포본이면 먼저 만들 것:
-
-```bash
-sudo bash gen-certs.sh --gencrl /etc/adts/certs
-```
-
-주의: `--revoke` 와 `--revoke-cert` 는 다르다. 전자는 아직 안 쓴 **토큰**을
-회수하고, 후자는 이미 발급된 **인증서**를 막는다.
-
-Qt 재발급(로그아웃 후 재등록)은 발급 서비스가 이전 인증서를 자동으로 CRL 에
-올린다. 다만 실제 차단은 브로커 restart 시점이라, 발급 요청 하나가 운영 중인
-스캔을 끊지 않도록 restart 는 관리자가 직접 한다.
+- **연결까지 끊기**: `mosquitto.conf` 에 `crlfile` 을 걸고 인증서를 폐기 목록에 올린다.
+  기기 분실 대응이 필요해지면 도입한다(현재 미적용).
 
 ## 문제 해결
 

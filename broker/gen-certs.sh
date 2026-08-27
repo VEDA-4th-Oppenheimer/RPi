@@ -34,23 +34,8 @@
 #      토큰은 발급 서비스(/enroll)가 1회용으로 검증하고, 쓰이는 즉시 파일에서
 #      사라진다. 관리자는 만들어서 팀원에게 전달만 하면 된다.
 #
-#  사용 ④  인증서 폐기 (CRL)
-#      bash gen-certs.sh --revoke-cert <CN> [출력디렉터리]
-#      bash gen-certs.sh --gencrl [출력디렉터리]      # CRL 만 다시 만든다
-#
-#      파일을 지우는 것으로는 인증서가 무효화되지 않는다 — 암호학적으로는
-#      여전히 유효하고, 사본을 가진 사람은 계속 adts/cmd/# 에 쓸 수 있다.
-#      실제로 막으려면 CRL 에 올리고 브로커가 그 CRL 을 보게 해야 한다.
-#
-#      주의: 폐기는 **브로커 restart 로만 반영된다.** reload(SIGHUP)는 ACL 만
-#        다시 읽으므로 crl.pem 이 바뀌어도 이미 만들어진 TLS 컨텍스트는 그대로다.
-#
 #  만들어지는 것 (②):
 #      <CN>.crt / <CN>.key / <CN>-trad.key
-#
-#  만들어지는 것 (④):
-#      index.txt / index.txt.attr / crlnumber / ca.cnf   CA 데이터베이스
-#      crl.pem                                            브로커가 읽는 CRL
 #
 #  주의: Qt(QSslKey)는 OpenSSL 3.x 기본인 PKCS#8 키를 QSsl::Rsa 로 읽으면
 #    null 을 반환하고 **조용히** 실패한다. 그래서 변환본을 같이 만든다.
@@ -70,12 +55,6 @@ usage() {
   bash gen-certs.sh --new-token <라벨>             # 1회용 발급 토큰 생성
   bash gen-certs.sh --list-tokens                  # 미사용 토큰 목록
   bash gen-certs.sh --revoke <라벨>                # 미사용 토큰 회수
-
-  bash gen-certs.sh --revoke-cert <CN> [출력디렉터리]  # 인증서 폐기 (CRL 갱신)
-  bash gen-certs.sh --gencrl [출력디렉터리]            # CRL 만 다시 생성
-
-  주의: --revoke 는 아직 안 쓴 **토큰**을 회수한다. 이미 발급된 **인증서**를
-    막는 것은 --revoke-cert 다. 둘은 전혀 다른 동작이다.
 
   토큰 파일 위치는 ADTS_TOKEN_FILE 로 바꾼다 (기본 /etc/adts/enroll_tokens).
 USAGE
@@ -200,117 +179,6 @@ fi
 #
 #  주소를 고정할 수 있게 되면(전용 링크 등) ADTS_EXTRA_SAN 으로 추가한다:
 #      ADTS_EXTRA_SAN="IP:192.168.50.10" bash gen-certs.sh --server adts-camera
-# ─────────────────────────────────────────────────────────────────────────────
-#  CA 데이터베이스 / CRL
-# ─────────────────────────────────────────────────────────────────────────────
-#  서명은 지금까지대로 `openssl x509 -req` 로 한다. 폐기만을 위해 `openssl ca` 로
-#  갈아타면 서명 경로 전체가 바뀌고(정책·확장·키 포맷) 이미 검증된 부분이 흔들린다.
-#
-#  핵심: `openssl ca -revoke` 는 **DB 에 없는 인증서도 스스로 등록한 뒤 폐기한다**
-#    ("Adding Entry with serial number ... to DB"). 그래서 DB 가 생기기 전에
-#    발급된 인증서도 마이그레이션 없이 그대로 폐기할 수 있다. 호스트에서 실측 확인함.
-#
-#  주의: default_crl_days 를 짧게 잡으면 안 된다. CRL 이 만료되면 검증하는 쪽이
-#    "CRL 이 낡았다"로 **모든 클라이언트를 거부한다.** 폐기가 없는 평시에 브로커가
-#    통째로 막히는 사고가 된다. 폐기할 때마다 어차피 다시 만들므로 길게 잡는다.
-ca_db_init() {
-    [ -f index.txt ]      || : > index.txt
-    # unique_subject=no 가 없으면 같은 CN 재발급이 "이미 있는 subject" 로 거부된다.
-    # 로그아웃 후 재등록이 정확히 그 경우다.
-    [ -f index.txt.attr ] || echo "unique_subject = no" > index.txt.attr
-    [ -f crlnumber ]      || echo 1000 > crlnumber
-    [ -f serial ]         || openssl rand -hex 8 | tr 'a-f' 'A-F' > serial
-
-    [ -f ca.cnf ] || cat > ca.cnf <<'CACNF'
-# gen-certs.sh 가 만든다. openssl ca -revoke / -gencrl 전용 설정이다
-# (서명에는 쓰지 않는다 — 서명은 openssl x509 -req 가 한다).
-[ca]
-default_ca = CA_default
-
-[CA_default]
-dir              = .
-database         = ./index.txt
-serial           = ./serial
-crlnumber        = ./crlnumber
-certificate      = ./ca.crt
-private_key      = ./ca.key
-new_certs_dir    = .
-default_md       = sha256
-default_days     = 3650
-default_crl_days = 3650
-policy           = policy_anything
-
-[policy_anything]
-commonName = supplied
-CACNF
-    chmod 600 index.txt crlnumber serial 2>/dev/null || true
-}
-
-gen_crl() {
-    openssl ca -config ca.cnf -gencrl -out crl.pem 2>/dev/null
-    chmod 644 crl.pem
-}
-
-if [ "${1:-}" = "--gencrl" ]; then
-    OUT="${2:-/etc/adts/certs}"
-    cd "$OUT" 2>/dev/null || { echo "출력 디렉터리가 없습니다: $OUT" >&2; exit 1; }
-    [ -f ca.crt ] && [ -f ca.key ] || {
-        echo "$OUT 에 ca.crt/ca.key 가 없습니다." >&2; exit 1; }
-
-    ca_db_init
-    gen_crl
-    echo "CRL 생성: $OUT/crl.pem"
-    openssl crl -in crl.pem -noout -lastupdate -nextupdate
-    echo
-    echo "폐기 목록:"
-    grep '^R' index.txt 2>/dev/null | awk -F'\t' '{print "  " $6 "  (serial " $4 ")"}' || echo "  (없음)"
-    exit 0
-fi
-
-if [ "${1:-}" = "--revoke-cert" ]; then
-    CN="${2:-}"
-    OUT="${3:-/etc/adts/certs}"
-    [ -n "$CN" ] || usage
-
-    case "$CN" in
-        *[!A-Za-z0-9._-]* | "" ) echo "CN 에는 영숫자와 . _ - 만 쓸 수 있습니다: $CN" >&2; exit 1 ;;
-    esac
-
-    cd "$OUT" 2>/dev/null || { echo "출력 디렉터리가 없습니다: $OUT" >&2; exit 1; }
-    [ -f ca.crt ] && [ -f ca.key ] || {
-        echo "$OUT 에 ca.crt/ca.key 가 없습니다." >&2; exit 1; }
-    [ -f "$CN.crt" ] || {
-        echo "인증서가 없습니다: $OUT/$CN.crt" >&2
-        echo "  이미 파일을 지웠다면 폐기할 수 없다 — CRL 에는 일련번호가 필요하다." >&2
-        exit 1; }
-
-    ca_db_init
-    openssl ca -config ca.cnf -revoke "$CN.crt" 2>&1 | grep -vi "^Using configuration" || true
-    gen_crl
-
-    # 폐기했으므로 키는 남겨둘 이유가 없다. 인증서는 CRL 대조용으로 남긴다.
-    rm -f "$CN.key" "$CN-trad.key"
-
-    cat <<EOF
-
-폐기 완료 (CN=$CN)
-  $OUT/crl.pem 갱신됨
-
-주의: **브로커를 restart 해야 반영된다.**
-  reload(SIGHUP)는 ACL 만 다시 읽는다. 이미 만들어진 TLS 컨텍스트는 그대로라
-  폐기한 인증서로 계속 붙는다.
-
-    sudo systemctl restart mosquitto
-
-주의: mosquitto.conf 에 아래가 없으면 CRL 을 아예 안 본다.
-    crlfile /etc/adts/certs/crl.pem
-
-ACL 에서도 빼려면 (선택 — 인증서가 막히므로 필수는 아니다):
-    /etc/mosquitto/conf.d/adts.acl 의 'user $CN' 블록 삭제
-EOF
-    exit 0
-fi
-
 if [ "${1:-}" = "--server" ]; then
     CN="${2:-}"
     OUT="${3:-/etc/adts/certs}"
@@ -496,15 +364,6 @@ if id mosquitto >/dev/null 2>&1; then
 fi
 rm -f ca.srl san.cnf
 
-# CA 데이터베이스와 빈 CRL 을 함께 만든다.
-#
-# 주의: mosquitto.conf 에 crlfile 을 켜 두면 그 파일이 **없을 때 브로커가 아예
-#   뜨지 않는다.** 폐기한 인증서가 하나도 없어도 빈 CRL 이 있어야 한다.
-#   그래서 최초 발급 시점에 미리 만들어 둔다.
-ca_db_init
-gen_crl
-echo "   crl.pem  (빈 CRL — 폐기 목록 없음)"
-
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────
@@ -512,7 +371,6 @@ cat <<EOF
 
 [RPi 에 남길 것]
   ca.crt ca.key server.crt server.key daemon.crt daemon.key
-  crl.pem index.txt index.txt.attr crlnumber serial ca.cnf   (CRL 용)
 
 [Mac 으로 가져갈 것 — 3개만]
   ca.crt  qt-console.crt  qt-console-trad.key
@@ -524,7 +382,5 @@ cat <<EOF
 주의: ca.key 는 절대 내보내지 말 것. 이 장비에만 있어야 한다.
 주의: 유효기간 ${DAYS}일. RPi 는 RTC 가 없어 인터넷 없이 부팅하면 시계가
    틀어져 "not yet valid" 로 거부될 수 있다 (fake-hwclock 확인).
-주의: 인증서를 막으려면 파일 삭제가 아니라 --revoke-cert 를 쓴다. 지운 파일은
-   암호학적으로 여전히 유효하고, 사본을 가진 사람은 계속 접속할 수 있다.
 ──────────────────────────────────────────────────────────────
 EOF
