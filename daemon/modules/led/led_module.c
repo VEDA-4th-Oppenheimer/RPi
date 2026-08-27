@@ -23,6 +23,7 @@
 #include "led_sw.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,7 +42,14 @@ static enum buzzer_seq s_buz_seq = BUZ_NONE;
 static int s_buz_ticks = 0;
 static uint8_t s_last_err = 0; /* 0 = ERR_NONE */
 
-static void update_leds_buzzer(const struct shared_ctx *ctx)
+/* advance = true 면 부저 시퀀스의 시계를 한 칸 돌린다.
+ *
+ * ⚠️ 이 함수는 on_tick(100ms 주기)과 on_state(상태 전이) 양쪽에서 불린다.
+ *   예전에는 둘 다 시계를 돌려서, 비프가 울리는 도중에 FSM 이 전이하면 그
+ *   전이가 틱 하나를 대신 먹었다. 0.5초 울려야 할 완료음이 0.4초가 되고,
+ *   전이가 몰리면 더 짧아진다. 시계는 **틱만** 돌리고, 전이는 지금 상태를
+ *   즉시 반영하기만 한다. */
+static void update_leds_buzzer(const struct shared_ctx *ctx, bool advance)
 {
     struct led_sw_ctrl ctrl = {0, 0, 0, 0};
 
@@ -63,7 +71,9 @@ static void update_leds_buzzer(const struct shared_ctx *ctx)
         /* 0.5초 1번 = 5 ticks ON */
         if (s_buz_ticks < 5) {
             ctrl.buzzer = 1u;
-            s_buz_ticks++;
+            if (advance) {
+                s_buz_ticks++;
+            }
         } else {
             ctrl.buzzer = 0u;
             s_buz_seq = BUZ_NONE;
@@ -81,7 +91,7 @@ static void update_leds_buzzer(const struct shared_ctx *ctx)
             s_buz_seq = BUZ_NONE;
         }
 
-        if (s_buz_seq != BUZ_NONE) {
+        if ((s_buz_seq != BUZ_NONE) && advance) {
             s_buz_ticks++;
         }
     }
@@ -182,7 +192,7 @@ static void led_on_tick(struct shared_ctx *ctx, daemon_state_t state)
     }
     s_last_err = ctx->link.last_err;
 
-    update_leds_buzzer(ctx);
+    update_leds_buzzer(ctx, true);    /* 틱이 시퀀스 시계다 */
 }
 
 /* cppcheck-suppress constParameterCallback ; 콜백 ABI 고정 */
@@ -201,7 +211,7 @@ static void led_on_state(struct shared_ctx *ctx,
         s_buz_ticks = 0;
     }
 
-    update_leds_buzzer(ctx);
+    update_leds_buzzer(ctx, false);   /* 전이는 표시만 — 시계는 안 돌린다 */
 }
 
 static void led_deinit(struct shared_ctx *ctx)
