@@ -404,14 +404,15 @@ static int request_gpio_safe(int pin, unsigned long flags, const char *label) {
    *         -EBUSY 가 아직도 나는지 다시 볼 것)
    *     ② 오버레이의 brcm,pins pinctrl 이 같은 핀을 이미 잡음
    *   ②라면 descriptor API(devm_gpiod_get)로 옮기면 깔끔히 풀린다. */
-  if (ret == -EBUSY || ret == -EPROBE_DEFER) {
-    pr_warn("led_sw: gpio %d 첫 요청 실패(%d) — 회수 후 재시도 (%s)\n", pin, ret,
-            label);
+  /* 주의: 바로 위 주석대로 **-EPROBE_DEFER 는 여기 조건에 넣지 않는다.**
+   *   예전에는 `ret == -EBUSY || ret == -EPROBE_DEFER` 였는데, 주석은 "되돌리지
+   *   않는다"고 적어놓고 코드는 되돌리고 있었다. 유예 상태에서 gpio_free() 는
+   *   특히 무의미하다 — 아직 존재하지도 않는 gpiochip 의 핀을, 우리가 쥔 적도
+   *   없는데 해제하려 드는 것이다. */
+  if (ret == -EBUSY) {
+    pr_warn("led_sw: gpio %d 사용 중(-EBUSY) — 회수 후 재시도 (%s)\n", pin, label);
     gpio_free(pin);
     ret = gpio_request_one(pin, flags, label);
-
-    /* 재시도도 defer 면 그건 진짜 "아직 준비 안 됐다" 이므로 그대로 올린다.
-     * 여기서 삼키면 커널이 나중에 probe 를 다시 불러줄 기회를 없앤다. */
   }
   return ret;
 }
@@ -694,30 +695,49 @@ static struct platform_driver led_sw_platform_driver = {
  *  Init & Exit
  * ------------------------------------------------------------------------- */
 static int __init led_sw_init(void) {
+  struct device_node *np;
   int ret;
 
   ret = platform_driver_register(&led_sw_platform_driver);
   if (ret)
     return ret;
 
-  /* DT 오버레이가 미로딩되었거나 probe 수동 호출 필요 시 폴백 생성 */
-  if (!g_led_sw) {
-    g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
-    if (IS_ERR(g_plat_dev)) {
-      ret = PTR_ERR(g_plat_dev);
-      g_plat_dev = NULL;
-      platform_driver_unregister(&led_sw_platform_driver);
-      return ret;
-    }
-
-    /* 폴백 장치로도 probe 가 실패한 경우 */
-    if (!g_led_sw) {
-      platform_device_unregister(g_plat_dev);
-      g_plat_dev = NULL;
-      platform_driver_unregister(&led_sw_platform_driver);
-      return -ENODEV;
-    }
+  /* DT 오버레이가 안 올라온 환경(개발 보드 등)을 위한 폴백 장치.
+   *
+   * ⚠️ 판단 기준이 `if (!g_led_sw)` 이면 안 된다. probe 가 -EPROBE_DEFER 로
+   *   유예되면 g_led_sw 가 NULL 인데, 그걸 "DT 장치가 없다"로 읽고 폴백을
+   *   만들면 **위에서 공들여 넣은 유예 처리가 통째로 무력화된다.** 실제로
+   *   두 가지가 연달아 터진다:
+   *     ① 폴백 장치는 of_node 가 없으므로 모듈 파라미터 핀(BCM 17 등)으로
+   *        probe 한다. 이 커널은 gpiochip base 가 512 라 그 번호로는 절대
+   *        성공할 수 없다(§2-2). 그 실패 과정에서 일부 핀을 잡았다 놓으면
+   *        나중에 DT 장치가 재probe 될 때 -EBUSY 로 이어진다.
+   *     ② 그 다음 `if (!g_led_sw)` 에서 드라이버를 통째로 unregister 하고
+   *        -ENODEV 로 insmod 를 실패시킨다. 커널이 gpiochip 준비 후 probe 를
+   *        다시 부르려 해도 **부를 드라이버가 이미 없다.** 한 번의 유예가
+   *        영구 실패가 된다.
+   *
+   *   그래서 기준을 "DT 에 우리 노드가 있는가"로 바꾼다. 있으면 바인딩은
+   *   커널에 맡기고(유예든 성공이든) 폴백을 만들지 않는다.
+   *
+   * ⚠️ probe 성공 여부로 insmod 성공을 판정하지도 않는다. 유예는 정상적인
+   *   중간 상태다 — 여기서 실패로 접으면 다시 같은 함정이다. */
+  np = of_find_compatible_node(NULL, NULL, "adts,led-sw");
+  if (np) {
+    of_node_put(np);
+    return 0;
   }
+
+  g_plat_dev = platform_device_register_simple("led_sw_custom", -1, NULL, 0);
+  if (IS_ERR(g_plat_dev)) {
+    ret = PTR_ERR(g_plat_dev);
+    g_plat_dev = NULL;
+    platform_driver_unregister(&led_sw_platform_driver);
+    return ret;
+  }
+  pr_info("led_sw: DT 노드 없음 — 모듈 파라미터로 폴백 장치 등록\n");
+  pr_warn("led_sw: 주의 — 이 커널은 gpiochip base 가 512 라 BCM 번호를 그대로 "
+          "쓰는 모듈 파라미터로는 실패한다. 오버레이를 올릴 것\n");
 
   return 0;
 }
