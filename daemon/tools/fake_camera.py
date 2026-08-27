@@ -35,6 +35,19 @@ def recv_exact(sock, n):
     return buf
 
 
+def decode_filename(raw):
+    if not 1 <= len(raw) <= 255:
+        raise ValueError(f"파일명 길이 범위 밖: {len(raw)}")
+    try:
+        name = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("파일명이 ASCII가 아니다") from exc
+    if ".." in name or any(not (ch.isascii() and (ch.isalnum() or ch in "._-"))
+                           for ch in name):
+        raise ValueError(f"허용되지 않은 파일명: {name!r}")
+    return name
+
+
 def serve_one(tls_sock, save):
     peer = tls_sock.getpeercert()
     cn = dict(x[0] for x in peer["subject"]).get("commonName", "?")
@@ -49,7 +62,9 @@ def serve_one(tls_sock, save):
         return
 
     name_len = struct.unpack("!H", recv_exact(tls_sock, 2))[0]
-    name = recv_exact(tls_sock, name_len).decode("ascii")
+    if not 1 <= name_len <= 255:
+        raise ValueError(f"파일명 길이 범위 밖: {name_len}")
+    name = decode_filename(recv_exact(tls_sock, name_len))
     file_len = struct.unpack("!Q", recv_exact(tls_sock, 8))[0]
 
     got, digest = 0, hashlib.sha256()
@@ -102,7 +117,7 @@ def main():
         except ssl.SSLError as e:
             # 여기로 오는 대부분은 클라이언트 인증서 문제다.
             print(f"   TLS 실패: {e}", flush=True)
-        except (EOFError, OSError) as e:
+        except (EOFError, OSError, ValueError) as e:
             print(f"   전송 실패: {e}", flush=True)
         finally:
             raw.close()
