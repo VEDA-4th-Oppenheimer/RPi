@@ -14,19 +14,29 @@ keyfile  /etc/adts/certs/server.key
 #  클라이언트도 인증서를 내야 한다. 이게 mTLS 와 단방향 TLS 의 차이다.
 require_certificate true
 
-#  폐기 목록. 인증서 파일을 지우는 것으로는 무효화되지 않는다 — 암호학적으로는
-#  여전히 유효해서, 사본을 가진 사람은 계속 adts/cmd/# 에 쓸 수 있다. 실제로
-#  막으려면 CRL 에 올리고 브로커가 그것을 보게 해야 한다.
-#    폐기:  sudo bash gen-certs.sh --revoke-cert <CN> /etc/adts/certs
+#  --- 인증서 폐기(CRL) — 기본 미사용 ---------------------------------------
 #
-#  주의: 이 줄을 켜면 crl.pem 이 **반드시 있어야 한다.** 없으면 브로커가 아예
-#    뜨지 않는다. 폐기한 것이 하나도 없어도 빈 CRL 이 필요하다. 기존 배포본이면
-#    먼저 만들 것:
+#  인증서 파일을 지우는 것으로는 무효화되지 않는다. 암호학적으로 여전히 유효해서
+#  사본을 가진 사람은 계속 adts/cmd/# 에 쓸 수 있다. 실제로 막으려면 CRL 이
+#  필요하다.
+#
+#  다만 지금은 켜지 않는다. 인증서 보유자가 전부 팀원이고 분실 사건이 없어서,
+#  접근 차단은 아래 ACL 에서 해당 CN 블록을 지우는 것으로 충분하다. 그쪽은
+#  reload(무중단)로 끝나고 연결만 허용될 뿐 발행·구독이 전부 막힌다.
+#
+#  기기 분실처럼 연결 자체를 끊어야 할 일이 생기면 아래 주석을 푼다.
+#
+#  주의: 켜기 전에 crl.pem 을 **반드시 먼저 만들어야 한다.** 없으면 브로커가
+#    아예 뜨지 않는다. 폐기한 것이 하나도 없어도 빈 CRL 이 필요하다.
 #        sudo bash gen-certs.sh --gencrl /etc/adts/certs
 #
 #  주의: CRL 변경은 **restart 로만 반영된다.** reload(SIGHUP)는 ACL 만 다시
-#    읽으므로, 폐기 후 reload 만 하면 그 인증서로 계속 접속된다.
-crlfile /etc/adts/certs/crl.pem
+#    읽으므로, 폐기 후 reload 만 하면 그 인증서로 계속 접속된다. restart 는
+#    붙어 있던 클라이언트를 전부 끊으므로 스캔 중에는 하지 않는다.
+#
+#  폐기:  sudo bash gen-certs.sh --revoke-cert <CN> /etc/adts/certs
+#
+#crlfile /etc/adts/certs/crl.pem
 
 #  인증서 CN 을 username 으로 삼는다 → 아래 ACL 이 신원 기반으로 동작한다.
 #    CN=qt-console / CN=adts-daemon / CN=camera

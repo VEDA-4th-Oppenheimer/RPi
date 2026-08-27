@@ -215,7 +215,32 @@ Qt 의 로그아웃은 **기기에 저장된 인증서·설정을 지울 뿐**�
 - **권한만 끊기**: ACL 에서 해당 CN 블록 삭제 → reload. 연결은 되지만 아무것도 못 한다.
 - **연결까지 끊기**: 아래 폐기(CRL).
 
-### 인증서 폐기 (CRL)
+### 인증서 폐기 (CRL) — 기본 미사용
+
+지금은 켜지 않는다. 인증서 보유자가 전부 팀원이고 분실 사건이 없어서, 접근
+차단은 ACL 블록 삭제로 충분하다. 그쪽은 `reload`(무중단)로 끝나고, 연결만
+허용될 뿐 발행·구독이 전부 막힌다.
+
+기기 분실처럼 **연결 자체**를 끊어야 할 일이 생기면 아래 순서로 켠다. 순서를
+바꾸면 브로커가 안 뜬다.
+
+```bash
+# 1) CRL 을 먼저 만든다 (빈 CRL — 폐기 목록 없음)
+sudo bash gen-certs.sh --gencrl /etc/adts/certs
+ls -l /etc/adts/certs/crl.pem              # mosquitto 가 읽을 수 있어야 한다
+
+# 2) 그 다음에 crlfile 을 켠다 (설정 파일을 통째로 덮어쓰지 말 것)
+sudo sed -i '/^require_certificate true/a crlfile /etc/adts/certs/crl.pem' \
+    /etc/mosquitto/conf.d/adts.conf
+sudo systemctl restart mosquitto
+systemctl is-active mosquitto              # failed 면 즉시 아래로 원복
+
+# 되돌리기
+sudo sed -i '/^crlfile /d' /etc/mosquitto/conf.d/adts.conf
+sudo systemctl restart mosquitto
+```
+
+켠 뒤의 폐기:
 
 ```bash
 sudo bash gen-certs.sh --revoke-cert qt-console-gwangjin /etc/adts/certs
